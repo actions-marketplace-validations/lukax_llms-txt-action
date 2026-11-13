@@ -1,0 +1,23 @@
+# This repo's own llms.txt, kept current by the action itself (the README's second example).
+name: llms.txt
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  llms:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          url: https://github.com/${{ github.repository }}
+      - run: |
+          git add llms.txt
+          git diff --cached --quiet && exit 0
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -m 'Update llms.txt'
+          git push
