@@ -1,0 +1,66 @@
+name: Generate llms.txt with llms.ink
+description: Generate llms.txt (and optionally llms-full.txt) for any website, docs section or GitHub repo, so AI models can read it.
+author: lukax
+branding:
+  icon: file-text
+  color: blue
+
+inputs:
+  url:
+    description: The site, docs section, page or GitHub repo to generate for, e.g. https://example.com or https://github.com/owner/repo.
+    required: true
+  path:
+    description: Where to write llms.txt.
+    default: llms.txt
+  full-path:
+    description: Where to write llms-full.txt (the index followed by the Markdown of up to 20 linked pages). Leave empty to skip it.
+    default: ''
+  fresh:
+    description: Rebuild instead of using llms.ink's cache (results are cached for 24 hours). Each rebuild counts against the free daily quota of 60 per IP address.
+    default: 'true'
+
+outputs:
+  source:
+    description: '`generated` when llms.ink wrote the file; `native` when the site publishes its own llms.txt, which is copied as is.'
+    value: ${{ steps.llms.outputs.source }}
+  pages:
+    description: How many links (llms.txt) or pages (llms-full.txt) the file covers.
+    value: ${{ steps.llms.outputs.pages }}
+  tokens:
+    description: Estimated tokens in llms.txt.
+    value: ${{ steps.llms.outputs.tokens }}
+
+runs:
+  using: composite
+  steps:
+    - id: llms
+      shell: bash
+      env:
+        URL: ${{ inputs.url }}
+        OUT: ${{ inputs.path }}
+        FULL_OUT: ${{ inputs.full-path }}
+        FRESH: ${{ inputs.fresh == 'true' && '1' || '0' }}
+      run: |
+        set -euo pipefail
+        command -v jq >/dev/null || { echo '::error title=llms.ink::jq is required on the runner.'; exit 1; }
+        # GET /api/v0/llms (https://llms.ink/docs/): errors are problem details with a readable `detail`.
+        fetch() {
+          local mode=$1 out=$2 reply code body
+          reply=$(curl -sS --retry 2 --retry-connrefused --max-time 300 -G https://llms.ink/api/v0/llms \
+            --data-urlencode "url=$URL" -d "mode=$mode" -d "fresh=$FRESH" \
+            -H 'User-Agent: llms-txt-action (+https://github.com/lukax/llms-txt-action)' -w $'\n%{http_code}')
+          code=${reply##*$'\n'}
+          body=${reply%$'\n'*}
+          if [ "$code" != 200 ]; then
+            echo "::error title=llms.ink ($code)::$(jq -r '.detail // .title' <<<"$body" 2>/dev/null || echo "HTTP $code from llms.ink")"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$out")"
+          jq -j .text <<<"$body" > "$out"
+          echo "Wrote $out ($(jq -r .source <<<"$body"), $(jq -r .pages <<<"$body") $( [ "$mode" = full ] && echo pages || echo links ), ~$(jq -r .tokens <<<"$body") tokens)"
+          if [ "$mode" = llms ]; then
+            { echo "source=$(jq -r .source <<<"$body")"; echo "pages=$(jq -r .pages <<<"$body")"; echo "tokens=$(jq -r .tokens <<<"$body")"; } >> "$GITHUB_OUTPUT"
+          fi
+        }
+        fetch llms "$OUT"
+        if [ -n "$FULL_OUT" ]; then fetch full "$FULL_OUT"; fi

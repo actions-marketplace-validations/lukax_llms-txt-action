@@ -1,0 +1,29 @@
+name: Test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  repo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: llms
+        uses: ./
+        with:
+          url: https://github.com/${{ github.repository }}
+          path: out/llms.txt
+          full-path: out/llms-full.txt
+      - name: Check the files
+        env:
+          SOURCE: ${{ steps.llms.outputs.source }}
+          PAGES: ${{ steps.llms.outputs.pages }}
+        run: |
+          set -x
+          test "$SOURCE" = generated
+          test "$PAGES" -gt 0
+          head -n 1 out/llms.txt | grep -q '^# '
+          tail -n 1 out/llms.txt | grep -qx '<!-- Generated with https://llms.ink -->'
+          grep -q '^---$' out/llms-full.txt
