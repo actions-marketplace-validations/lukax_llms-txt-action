@@ -101,7 +101,8 @@ jobs:
 - **Links are real:** the model only picks from links llms.ink actually found, so it can't invent URLs. Its one-line
   descriptions can still be imperfect; review the first file before you publish it.
 
-Also on llms.ink: a [JSON API](https://llms.ink/docs/) and an MCP server for agents (`https://llms.ink/mcp`).
+Also on llms.ink: a [JSON API](https://llms.ink/docs/), an MCP server for agents (`https://llms.ink/mcp`) and a CLI
+(`npx @lukax/llms-ink`).
 
 ## License
 
