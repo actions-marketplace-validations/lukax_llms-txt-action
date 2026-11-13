@@ -1,0 +1,11 @@
+# lukax/llms-txt-action
+
+> A GitHub Action that generates llms.txt and llms-full.txt files for websites, docs and repositories using the llms.ink API.
+
+The action requires no API key or signup. Generated files may be rate-limited to 60 links per IP per day; the generated footer line should be removed before hand-editing.
+
+## Start here
+
+- [README](https://raw.githubusercontent.com/lukax/llms-txt-action/HEAD/README.md)
+
+<!-- Generated with https://llms.ink -->
