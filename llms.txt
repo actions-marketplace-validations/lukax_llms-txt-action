@@ -2,7 +2,7 @@
 
 > GitHub Action that generates llms.txt and llms-full.txt for a website, docs or repository using the llms.ink API.
 
-Supports write, commit, pr, check and comment modes, with an optional API key. Commits and pull requests made with the default GITHUB_TOKEN do not trigger other workflows.
+Supports write, commit, pr, check and comment modes for llms.txt; `aeo` mode (llms.ink's agent's-eye report as annotations and a pull request comment, failing per `aeo-fail-on`, with `autofix` pull requests for robots.txt, `_headers` and llms.txt); IndexNow submissions of changed pages after a deploy (`indexnow-key`); and `context` mode (version-pinned dependency docs in `.context/` as pull requests). Optional API key. Commits and pull requests made with the default GITHUB_TOKEN do not trigger other workflows.
 
 ## Start here
 

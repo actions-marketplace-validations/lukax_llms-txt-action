@@ -8,6 +8,10 @@ the free [llms.ink](https://llms.ink) API; an API key is optional.
 - **Websites and docs:** a summary and sections of the most useful links, found on the page, in its sitemap and in its links.
 - **GitHub repos:** the README plus every documentation file, linked as raw Markdown.
 - **llms-full.txt** (optional): the same index followed by the full Markdown of up to 20 linked pages.
+- **What agents see** (`mode: aeo`): llms.ink's agent's-eye report on pull requests, failing on problems, with an
+  optional pull request fixing robots.txt, `_headers` and llms.txt.
+- **IndexNow on deploy** (`indexnow-key`): changed pages submitted to Bing, Yandex, Seznam, Naver, Yep and others.
+- **Dependency docs** (`mode: context`): version-pinned docs for what the repo imports, in `.context/`, as pull requests.
 
 ```yaml
 - uses: lukax/llms-txt-action@v1
@@ -26,6 +30,9 @@ the free [llms.ink](https://llms.ink) API; an API key is optional.
 | `pr` | Writes the files, then pushes them to the branch `llms-ink/llms-txt` (or `branch`) and opens a pull request, or updates the open one. | llms.ink or GitHub returns an error. |
 | `check` | Checks llms.txt (format at llmstxt.org, first 25 links): the one the site publishes, or the file at `path` in the checkout when you set `path` (see `check-target`). Writes nothing. | The file is missing, has format errors, or has broken links. Warnings don't fail. |
 | `comment` | On a pull request: generates llms.txt, compares it with `path` in the repository section by section, and posts one comment (updated on every run). Writes nothing. | llms.ink returns an error. Differences never fail it. |
+| `aeo` | Reads `url` the way AI agents do ([llms.ink report](https://llms.ink/report/): bot access, raw-HTML visibility, Markdown, agent files, hidden instructions). Annotations, a job summary, and on pull requests one comment updated on every run. With `autofix: true`, also opens or updates a pull request applying the report's robots.txt, `_headers` and llms.txt fixes. | Any check fails (`aeo-fail-on: fail`, default), also on warnings (`warn`), or never (`none`). |
+| `context` | Runs `npx -y @lukax/llms-ink context` in the checkout: version-pinned docs for the dependencies the repo imports, in `context-dir`, indexed in `agents-md`. Opens or updates a pull request from `llms-ink/context` when they changed. | The CLI or GitHub returns an error. |
+| `indexnow` | Only the IndexNow step (see `indexnow-key`), without generating anything. | The key file is missing or IndexNow rejects the submission. |
 
 `commit` and `pr` work through the GitHub API, so they don't need a local `git` identity, and each run makes at most one
 commit. In `pr` mode the branch is rebuilt on top of the base branch every run, so the pull request always holds one
@@ -40,6 +47,16 @@ commit.
 | `pr` | `contents: write`, `pull-requests: write` | Settings → Actions → General → **Allow GitHub Actions to create and approve pull requests** |
 | `check` | none | |
 | `comment` | `pull-requests: write` | `actions/checkout`, to read the committed file. On pull requests from forks the token can't comment: the job warns and passes. |
+| `aeo` | none; `pull-requests: write` to comment; `contents: write` and `pull-requests: write` with `autofix` | |
+| `context` | `contents: write`, `pull-requests: write` | `actions/checkout` and your package manager's install (the CLI reads the lockfile); the pull request setting above |
+| `indexnow` | `contents: read` | |
+
+`indexnow-key` works in any mode: after the mode's work succeeds, the action checks that `https://<site>/<key>.txt`
+holds the key, then submits `indexnow-urls`, or else the pages the deployed (`deployment_status`, `workflow_run`) or
+pushed commit changed, matched by path against the site's sitemap (`src/pages/docs/intro.mdx`,
+`content/docs/intro.md` → `/docs/intro/`; components, styles and config match nothing, so a shared change doesn't
+resubmit the whole site). IndexNow doesn't reach Google, and nobody confirms it helps ChatGPT; it keeps Bing and
+Copilot current cheaply.
 
 Commits and pull requests made with the default `GITHUB_TOKEN` don't start other workflows (your host's own Git
 integration, such as Vercel, Netlify or Cloudflare Pages, still deploys them). To start workflows, pass a personal
@@ -239,6 +256,91 @@ jobs:
 Errors and warnings show up as annotations on the run, and the job summary lists every check and the file's outline
 (title, summary, sections and their link counts). Checks don't count against the daily quota.
 
+### What agents see, on every pull request
+
+Report on the preview deploy (or production) the way GPTBot, ClaudeBot and ChatGPT-User read it, and fail the pull
+request when a page went JavaScript-only, robots.txt started blocking a search bot, or `.md` pages stopped serving:
+
+```yaml
+name: Agent readiness
+on: pull_request
+
+permissions:
+  pull-requests: write
+
+jobs:
+  aeo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: lukax/llms-txt-action@v1
+        with:
+          url: https://example.com/docs/   # or your preview URL
+          mode: aeo
+          aeo-fail-on: fail                # warn | none
+```
+
+Each check that fails or warns becomes an annotation; the job summary and the pull request comment (one, updated on
+every push) list them with their fixes and link to the full report. Add `autofix: true` (with `contents: write`) on
+a schedule to get a pull request from `llms-ink/aeo-fixes` that applies the fixes the report can write itself:
+robots.txt and Content-Signal lines that let search bots in while keeping your training choices, `_headers` (Netlify,
+Cloudflare Pages), and llms.txt. Files go next to the existing ones, else in `public/` or `static/`, or in
+`autofix-dir`. Nothing else is ever changed; review before merging.
+
+### IndexNow after each deploy
+
+```yaml
+name: IndexNow
+on: deployment_status
+
+permissions:
+  contents: read
+
+jobs:
+  indexnow:
+    if: github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: lukax/llms-txt-action@v1
+        with:
+          url: https://example.com
+          mode: indexnow
+          indexnow-key: ${{ vars.INDEXNOW_KEY }}   # also served at https://example.com/<key>.txt
+```
+
+Put the key file in your static folder once (`public/<key>.txt` containing the key). Pass `indexnow-urls` to choose
+the URLs yourself.
+
+### Dependency docs for coding agents
+
+Weekly, refresh version-pinned docs for the packages your code imports and get a pull request with the diff:
+
+```yaml
+name: Dependency docs
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  context:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukax/llms-txt-action@v1
+        with:
+          mode: context
+          context-max: 10
+          api-key: ${{ secrets.LLMS_INK_KEY }}
+```
+
+`.context/<package>@<version>.md` files list their sources; AGENTS.md gets a short index between
+`<!-- llms-ink:context:start -->` and `<!-- llms-ink:context:end -->`. Packs for removed dependencies are deleted in
+the same pull request.
+
 ### Use an API key
 
 Without a key, rebuilds share llms.ink's free quota of 60 new links per IP address per day, and GitHub-hosted runners
@@ -259,29 +361,42 @@ An invalid or revoked key fails the job with `401 invalid_key`; the action never
 
 | Input | Default | |
 |---|---|---|
-| `url` | (required) | The site, docs section, page or GitHub repo, e.g. `https://example.com` or `https://github.com/owner/repo`. |
+| `url` | (required) | The site, docs section, page or GitHub repo, e.g. `https://example.com` or `https://github.com/owner/repo`. Not used in `context` mode. |
 | `path` | `llms.txt` | Where to write llms.txt. In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against; in `check` mode, the file to lint (only when set). |
 | `full-path` | (empty) | Where to write llms-full.txt. Empty skips it. Not used in `check` and `comment` modes. |
 | `fresh` | `true` | Rebuild instead of using llms.ink's 24-hour cache. |
-| `mode` | `write` | `write`, `commit`, `pr`, `check` or `comment` (see [Modes](#modes)). |
+| `mode` | `write` | `write`, `commit`, `pr`, `check`, `comment`, `aeo`, `context` or `indexnow` (see [Modes](#modes)). |
 | `api-key` | (empty) | llms.ink API key, sent as `Authorization: Bearer`. Use `${{ secrets.LLMS_INK_KEY }}`. |
 | `generated` | `false` | `true` always generates and never copies the site's own llms.txt. Set it when your /llms.txt is served from llms.ink. |
-| `commit-message` | `Update llms.txt` | Commit message in `commit` and `pr` modes, and the pull request title. |
-| `branch` | (empty) | `commit`: the branch to commit to (default: the branch the workflow runs on, or the default branch). `pr`: the branch the pull request comes from (default: `llms-ink/llms-txt`). |
-| `token` | `github.token` | Token for `commit`, `pr` and `comment`. |
+| `commit-message` | `Update llms.txt` | Commit message in `commit`, `pr` and `context` modes and for `autofix`, and the pull request title (`Update dependency docs in .context` and `Fix agent access (llms.ink report)` when not set). |
+| `branch` | (empty) | `commit`: the branch to commit to (default: the branch the workflow runs on, or the default branch). `pr`, `context`, `autofix`: the branch the pull request comes from (default: `llms-ink/llms-txt`, `llms-ink/context`, `llms-ink/aeo-fixes`). |
+| `token` | `github.token` | Token for `commit`, `pr`, `comment`, `context`, `aeo` comments and `autofix`, and for reading the deployed commit's changes for IndexNow. |
 | `check-target` | `auto` | `check` mode: `auto` lints the file at `path` when `path` is set and the file exists, else checks the site at `url`; `file` always lints the file at `path` (default `llms.txt`; fails when it's missing); `live` always checks the site. |
 | `links` | `true` | `check` mode on a file: also check up to 25 linked URLs and llms-full.txt next to `url`. The live check always does. |
+| `aeo-fail-on` | `fail` | `aeo` mode: `fail` fails the job on any failed check, `warn` also on warnings, `none` never. |
+| `autofix` | `false` | `aeo` mode: open or update a pull request applying the report's robots.txt, `_headers` and llms.txt fixes. |
+| `autofix-dir` | (empty) | `autofix`: folder for fixed files. Default: next to the existing file, else `public/` or `static/`, else the root. |
+| `indexnow-key` | (empty) | Any mode: after it succeeds, submit changed URLs to IndexNow. The key must be served at `https://<site>/<key>.txt`. |
+| `indexnow-urls` | (empty) | URLs or paths to submit, one per line or comma-separated. Default: the pages the deployed or pushed commit changed, matched against the sitemap. |
+| `indexnow-key-location` | (empty) | The key file's URL or path when it isn't `/<key>.txt` (same host). |
+| `context-dir` | `.context` | `context` mode: where the docs go (`--out`). |
+| `context-max` | `10` | `context` mode: the most dependencies to document (`--max`). |
+| `manifests` | (empty) | `context` mode: manifests or lockfiles to read (`--manifest`), one per line. Default: what the CLI finds. |
+| `agents-md` | `AGENTS.md` | `context` mode: the file whose context block is kept current (`--agents-md`); `none` skips it. |
 
 ## Outputs
 
 | Output | |
 |---|---|
-| `changed` | `true` when the new file differs from the previous one: the file in the workspace (`write`, `comment`) or on the branch (`commit`, `pr`). `false` in `check` mode. |
+| `changed` | `true` when the new file differs from the previous one: the file in the workspace (`write`, `comment`) or on the branch (`commit`, `pr`); in `context` mode and with `autofix`, when the pull request has changes. `false` in `check` mode. |
 | `tokens` | Estimated tokens in llms.txt (in `check` mode, in the published file). |
 | `path` | Where llms.txt was written; empty in `check` and `comment` modes. |
-| `pr-url` | The pull request opened or updated in `pr` mode (or the open one when nothing changed). |
+| `pr-url` | The pull request opened or updated in `pr` and `context` modes and by `autofix` (or the open one when nothing changed). |
 | `source` | `generated` when llms.ink wrote the file, `native` when the site publishes its own llms.txt (copied as is). |
 | `pages` | Links in llms.txt. |
+| `aeo-fail` | `aeo` mode: checks that failed. |
+| `aeo-warn` | `aeo` mode: checks that warned. |
+| `indexnow-submitted` | URLs submitted to IndexNow (empty without `indexnow-key`). |
 
 Use `changed` to decide whether a later step should redeploy:
 
@@ -324,6 +439,7 @@ Also on llms.ink: a [JSON API](https://llms.ink/docs/), an MCP server for agents
 npm test                                                     # unit tests, mocked llms.ink and GitHub APIs
 node test/harness.mjs url=https://llmstxt.org mode=check     # run action.yml's step locally against llms.ink
 node test/harness.mjs --mock --pr 7 mode=comment url=https://acme.test
+node test/harness.mjs --mock --pr 7 mode=aeo url=https://acme.test autofix=true   # stubbed report, PR comment, autofix PR
 ```
 
 The harness maps inputs (with action.yml's defaults) through the step's `env` block, sets the `GITHUB_*` files in a temp

@@ -19,6 +19,64 @@ export const LLMS_TXT = `# Acme
 <!-- Generated with https://llms.ink -->
 `;
 
+export const SITE = 'https://acme.test';
+export const INDEXNOW_API = 'https://indexnow.mock/indexnow';
+export const INDEXNOW_KEY = 'a1b2c3d4e5f6';
+
+/** An agent's-eye report (GET /api/v0/report) with one check per interesting case. */
+export const REPORT = {
+  url: 'https://acme.test/',
+  site: 'https://acme.test',
+  checkedAt: '2026-11-14T00:00:00Z',
+  summary: { pass: 2, warn: 3, fail: 1, info: 1 },
+  sections: [
+    {
+      id: 'access',
+      title: 'Access',
+      checks: [
+        {
+          id: 'robots-oai-searchbot',
+          status: 'fail',
+          title: 'OAI-SearchBot blocked by robots.txt',
+          detail: 'robots.txt disallows / for OAI-SearchBot | ChatGPT search can’t cite you.',
+          evidence: 'User-agent: OAI-SearchBot\nDisallow: /',
+          fix: { kind: 'robots', summary: 'Allow OAI-SearchBot, keep GPTBot (training) blocked.', patch: { file: 'robots.txt', content: 'User-agent: GPTBot\nDisallow: /\n\nUser-agent: OAI-SearchBot\nAllow: /\n' } },
+        },
+        { id: 'probe-claudebot', status: 'pass', title: 'ClaudeBot gets the page', detail: '200 with the same HTML.' },
+      ],
+    },
+    {
+      id: 'agent-files',
+      title: 'Agent files',
+      checks: [
+        {
+          id: 'vary-accept',
+          status: 'warn',
+          title: 'No Vary: Accept',
+          detail: 'Markdown negotiation without Vary: Accept can be cached for browsers.',
+          fix: { kind: 'headers', summary: 'Add Vary: Accept to pages.', patch: { file: '/_headers', content: '/*\n  Vary: Accept' } },
+        },
+        {
+          id: 'llms-txt',
+          status: 'warn',
+          title: 'llms.txt is stale',
+          detail: '3 links answer 404.',
+          fix: { kind: 'llms-txt', summary: 'Regenerate llms.txt.', patch: { file: 'llms.txt', content: '# Acme\n\n> Acme makes things.\n' } },
+        },
+        {
+          id: 'md-urls',
+          status: 'warn',
+          title: 'No .md versions',
+          detail: '/docs.md answers 404.',
+          fix: { kind: 'markdown', summary: 'Serve .md pages with the build plugin.', patch: { file: 'astro.config.mjs', content: 'export default {}' } },
+        },
+        { id: 'ard', status: 'info', title: 'No ard.json', detail: 'Optional; few readers yet.' },
+        { id: 'llms-found', status: 'pass', title: 'llms.txt found', detail: 'https://acme.test/llms.txt' },
+      ],
+    },
+  ],
+};
+
 const sha = (v) => createHash('sha1').update(JSON.stringify(v)).digest('hex');
 const json = (status, body, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 const problem = (status, code, detail) => json(status, { type: 'https://llms.ink/docs/#errors', title: 'Error', status, code, detail });
@@ -68,6 +126,22 @@ export function mockApi(repo = {}) {
     /** When set, POST /pulls answers 403 with this message. */
     forbidPulls: null,
     forbidComments: false,
+    report: REPORT,
+    /** Site files served at SITE: path → { status, body }. */
+    site: {
+      [`/${INDEXNOW_KEY}.txt`]: { status: 200, body: `${INDEXNOW_KEY}\n` },
+      '/sitemap.xml': {
+        status: 200,
+        body: '<?xml version="1.0"?><sitemapindex><sitemap><loc>https://acme.test/sitemap-0.xml</loc></sitemap></sitemapindex>',
+      },
+      '/sitemap-0.xml': {
+        status: 200,
+        body: `<urlset>${['/', '/docs/', '/docs/intro/', '/blog/hello/', '/pricing', '/about'].map((p) => `<url><loc>https://acme.test${p}</loc></url>`).join('')}</urlset>`,
+      },
+    },
+    /** Bodies POSTed to IndexNow, and the status it answers. */
+    indexnow: [],
+    indexnowStatus: 200,
     trees: new Map(),
     commits: new Map(),
     refs: new Map(),
@@ -111,7 +185,16 @@ export function mockApi(repo = {}) {
         return json(200, { ...state.check, site: q.base ?? null, url: q.base ? new URL('/llms.txt', q.base).href : null, llmsFull: q.links === '1' && q.base ? false : null });
       }
       if (p.endsWith('/check')) return json(200, state.check);
+      if (p.endsWith('/report')) return state.report ? json(200, { ...state.report, url: state.report.url ?? q.url }) : problem(404, 'not_found', 'No such endpoint');
       return problem(404, 'not_found', 'No such endpoint');
+    }
+    if (url.startsWith(INDEXNOW_API)) {
+      state.indexnow.push(body);
+      return new Response('', { status: state.indexnowStatus });
+    }
+    if (url.startsWith(SITE)) {
+      const f = state.site[p];
+      return f ? new Response(f.body, { status: f.status }) : new Response('Not found', { status: 404 });
     }
 
     const m = p.match(/^\/repos\/[^/]+\/[^/]+(.*)$/);
@@ -142,8 +225,17 @@ export function mockApi(repo = {}) {
     }
     if (method === 'POST' && r === '/git/trees') {
       const files = { ...state.trees.get(body.base_tree) };
-      for (const e of body.tree) files[e.path] = e.content;
+      for (const e of body.tree) {
+        if (e.sha === null) delete files[e.path];
+        else files[e.path] = e.content;
+      }
       return json(201, { sha: putTree(files) });
+    }
+    if (method === 'GET' && (x = r.match(/^\/git\/trees\/(\w+)$/))) {
+      const files = state.trees.get(x[1]);
+      if (!files) return json(404, { message: 'Not Found' });
+      const blob = (c) => createHash('sha1').update(`blob ${Buffer.byteLength(c)}\0`).update(c).digest('hex');
+      return json(200, { sha: x[1], tree: Object.entries(files).map(([path, c]) => ({ path, type: 'blob', mode: '100644', sha: blob(c) })), truncated: false });
     }
     if (method === 'POST' && r === '/git/commits') return json(201, { sha: putCommit(body.tree, body.parents, body.message) });
     if (method === 'PATCH' && (x = r.match(/^\/git\/refs\/heads\/(.+)$/))) {

@@ -1,4 +1,4 @@
-// llms.ink API (https://llms.ink/docs/): GET /api/v0/llms, GET /api/v0/check and POST /api/v0/check.
+// llms.ink API (https://llms.ink/docs/): GET /api/v0/llms, GET and POST /api/v0/check, GET /api/v0/report.
 
 export const API = 'https://llms.ink/api/v0';
 export const USER_AGENT = 'llms-txt-action (+https://github.com/lukax/llms-txt-action)';
@@ -73,3 +73,8 @@ export function checkText(text, { base, links = false }, deps) {
 
 /** Whether a check result should fail the job: any error, or any broken link. */
 export const checkFailed = (result) => result.summary.errors > 0 || result.links.broken.length > 0 || !result.found;
+
+/** The agent's-eye report (GET /api/v0/report): `summary` counts and `sections` of checks with their fixes. */
+export function report(url, deps) {
+  return request('report', { url }, deps);
+}

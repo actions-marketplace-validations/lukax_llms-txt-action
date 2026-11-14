@@ -1,12 +1,12 @@
 {
   "name": "llms-txt-action",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
-  "description": "GitHub Action: generate, commit, PR, check or comment on llms.txt with llms.ink. No dependencies.",
+  "description": "GitHub Action: generate, commit, PR, check or comment on llms.txt; report what AI agents see and fix it in PRs; IndexNow on deploy; dependency docs in .context. With llms.ink. No dependencies.",
   "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {
-    "test": "node --test test/sections.test.mjs test/action.test.mjs",
+    "test": "node --test test/sections.test.mjs test/action.test.mjs test/modes.test.mjs",
     "harness": "node test/harness.mjs"
   },
   "license": "MIT"

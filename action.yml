@@ -1,5 +1,5 @@
 name: Generate llms.txt with llms.ink
-description: Generate llms.txt (and optionally llms-full.txt) for any website, docs section or GitHub repo, so AI models can read it.
+description: Generate and check llms.txt, report what AI agents see on your site, fix it in PRs, ping IndexNow and keep dependency docs current, with llms.ink.
 author: lukax
 branding:
   icon: file-text
@@ -7,8 +7,8 @@ branding:
 
 inputs:
   url:
-    description: The site, docs section, page or GitHub repo to generate for (or to check), e.g. https://example.com or https://github.com/owner/repo.
-    required: true
+    description: The site, docs section, page or GitHub repo to generate for (or to check or report on), e.g. https://example.com or https://github.com/owner/repo. Required in every mode but `context`.
+    required: false
   path:
     description: Where to write llms.txt (default `llms.txt`). In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against; in `check` mode, the file to lint, only when set explicitly (see `check-target`).
     default: ''
@@ -19,7 +19,7 @@ inputs:
     description: Rebuild instead of using llms.ink's cache (results are cached for 24 hours). Each rebuild counts against the daily quota (60 per IP address without a key).
     default: 'true'
   mode:
-    description: '`write` the file (default); `commit` it to the branch when it changed; open or update a `pr`; `check` llms.txt (the file at `path` in the checkout, or the one the site publishes) and fail on errors or broken links; or `comment` the section diff on a pull request.'
+    description: '`write` the file (default); `commit` it to the branch when it changed; open or update a `pr`; `check` llms.txt (the file at `path` in the checkout, or the one the site publishes) and fail on errors or broken links; `comment` the section diff on a pull request; `aeo` reports what AI agents see at `url` (annotations, job summary, a pull request comment) and fails per `aeo-fail-on`; `context` refreshes version-pinned dependency docs in `context-dir` and opens a pull request; `indexnow` only submits changed URLs to IndexNow.'
     default: write
   api-key:
     description: 'Optional llms.ink API key (`lk_…`), sent as `Authorization: Bearer`. Gives the job its own daily quota instead of the runner''s shared IP quota. Use a secret, e.g. secrets.LLMS_INK_KEY.'
@@ -28,10 +28,10 @@ inputs:
     description: 'Always generate, never copy the site''s own llms.txt (sends `native=0`). Set it to `true` when your /llms.txt is served from llms.ink.'
     default: 'false'
   commit-message:
-    description: Commit message in `commit` and `pr` modes; also the pull request title.
-    default: Update llms.txt
+    description: Commit message in `commit`, `pr`, `context` and `autofix`; also the pull request title. Default `Update llms.txt` (`Fix agent access (llms.ink report)` with `autofix`, `Update dependency docs in .context` in `context` mode).
+    default: ''
   branch:
-    description: '`commit` mode: the branch to commit to (default: the branch the workflow runs on). `pr` mode: the branch the pull request is opened from (default: llms-ink/llms-txt).'
+    description: '`commit` mode: the branch to commit to (default: the branch the workflow runs on). `pr`, `context` and `autofix`: the branch the pull request is opened from (default: llms-ink/llms-txt, llms-ink/context, llms-ink/aeo-fixes).'
     default: ''
   token:
     description: GitHub token for `commit`, `pr` and `comment` modes. Commits pushed with the default token don't start other workflows; pass a personal access token or GitHub App token for that.
@@ -42,10 +42,40 @@ inputs:
   links:
     description: '`check` mode on a file: also check up to 25 linked URLs and llms-full.txt next to `url`. The live check always checks links.'
     default: 'true'
+  aeo-fail-on:
+    description: '`aeo` mode: `fail` (default) fails the job when any check fails; `warn` also on warnings; `none` never (report only).'
+    default: fail
+  autofix:
+    description: '`aeo` mode: open or update a pull request applying the report''s robots.txt, `_headers` and llms.txt fixes. Nothing else is ever changed. Needs `contents: write` and `pull-requests: write`.'
+    default: 'false'
+  autofix-dir:
+    description: '`autofix`: the folder fixed files go in (e.g. `public`). Default: next to the existing file, else `public/` or `static/` when the repo has one, else the root.'
+    default: ''
+  indexnow-key:
+    description: 'Submit changed URLs of `url`''s site to IndexNow (Bing, Yandex, Seznam, Naver, Yep…) after the mode''s work. The key must be served at https://<site>/<key>.txt (checked first). Any mode; `mode: indexnow` does only this.'
+    default: ''
+  indexnow-urls:
+    description: 'URLs (or paths) to submit, one per line or comma-separated. Default: the pages the deployed or pushed commit changed, matched against the site''s sitemap.'
+    default: ''
+  indexnow-key-location:
+    description: Where the key file is, when not at /<key>.txt (same host).
+    default: ''
+  context-dir:
+    description: '`context` mode: the folder `llms-ink context` writes (`--out`).'
+    default: .context
+  context-max:
+    description: '`context` mode: the most dependencies to document (`--max`).'
+    default: '10'
+  manifests:
+    description: '`context` mode: manifests or lockfiles to read (`--manifest`), one per line. Default: what the CLI finds in the repository.'
+    default: ''
+  agents-md:
+    description: '`context` mode: the file whose llms-ink context block is kept current (`--agents-md`). `none` to skip it.'
+    default: AGENTS.md
 
 outputs:
   changed:
-    description: '`true` when the generated file differs from the previous one: the file on disk (`write`, `comment`) or on the branch (`commit`, `pr`). Always `false` in `check` mode.'
+    description: '`true` when the generated file differs from the previous one: the file on disk (`write`, `comment`) or on the branch (`commit`, `pr`); in `context` mode and with `autofix`, when the pull request has changes. Always `false` in `check` mode.'
     value: ${{ steps.llms.outputs.changed }}
   tokens:
     description: Estimated tokens in llms.txt (in `check` mode, in the published file).
@@ -54,7 +84,7 @@ outputs:
     description: Where llms.txt was written; empty in `check` and `comment` modes.
     value: ${{ steps.llms.outputs.path }}
   pr-url:
-    description: The pull request opened or updated in `pr` mode (or the open one, when nothing changed).
+    description: The pull request opened or updated in `pr` and `context` modes and by `autofix` (or the open one, when nothing changed).
     value: ${{ steps.llms.outputs.pr-url }}
   source:
     description: '`generated` when llms.ink wrote the file; `native` when the site publishes its own llms.txt, which is copied as is.'
@@ -62,6 +92,15 @@ outputs:
   pages:
     description: How many links llms.txt covers.
     value: ${{ steps.llms.outputs.pages }}
+  aeo-fail:
+    description: '`aeo` mode: how many checks failed.'
+    value: ${{ steps.llms.outputs.aeo-fail }}
+  aeo-warn:
+    description: '`aeo` mode: how many checks warned.'
+    value: ${{ steps.llms.outputs.aeo-warn }}
+  indexnow-submitted:
+    description: How many URLs were submitted to IndexNow (empty without `indexnow-key`).
+    value: ${{ steps.llms.outputs.indexnow-submitted }}
 
 runs:
   using: composite
@@ -81,6 +120,16 @@ runs:
         INPUT_TOKEN: ${{ inputs.token }}
         INPUT_CHECK_TARGET: ${{ inputs.check-target }}
         INPUT_LINKS: ${{ inputs.links }}
+        INPUT_AEO_FAIL_ON: ${{ inputs.aeo-fail-on }}
+        INPUT_AUTOFIX: ${{ inputs.autofix }}
+        INPUT_AUTOFIX_DIR: ${{ inputs.autofix-dir }}
+        INPUT_INDEXNOW_KEY: ${{ inputs.indexnow-key }}
+        INPUT_INDEXNOW_URLS: ${{ inputs.indexnow-urls }}
+        INPUT_INDEXNOW_KEY_LOCATION: ${{ inputs.indexnow-key-location }}
+        INPUT_CONTEXT_DIR: ${{ inputs.context-dir }}
+        INPUT_CONTEXT_MAX: ${{ inputs.context-max }}
+        INPUT_MANIFESTS: ${{ inputs.manifests }}
+        INPUT_AGENTS_MD: ${{ inputs.agents-md }}
       run: |
         command -v node >/dev/null || { echo '::error title=llms.ink::Node.js 20 or later is required on the runner.'; exit 1; }
         node "$GITHUB_ACTION_PATH/src/main.mjs"

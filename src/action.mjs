@@ -2,19 +2,27 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, posix, resolve } from 'node:path';
-import { gitHub } from './github.mjs';
-import { check, checkFailed, checkText, generate, LlmsInkError } from './llms.mjs';
+import { AEO_FAIL_ON, aeoFailed, aeoMarker, checksOf, fixBody, fixFiles, reportMarkdown } from './aeo.mjs';
+import { contextArgs, contextChanges, exec as spawnExec } from './context.mjs';
+import { gitHub, proposePull } from './github.mjs';
+import { changedUrls, checkKey, INDEXNOW_API, IndexNowError, parseUrls, sitemapUrls, submit } from './indexnow.mjs';
+import { check, checkFailed, checkText, generate, LlmsInkError, report } from './llms.mjs';
 import { countSections, describeDiff, diffSections, diffTable } from './sections.mjs';
 
-export const MODES = ['write', 'commit', 'pr', 'check', 'comment'];
+export const MODES = ['write', 'commit', 'pr', 'check', 'comment', 'aeo', 'context', 'indexnow'];
 export const CHECK_TARGETS = ['auto', 'file', 'live'];
 export const PR_BRANCH = 'llms-ink/llms-txt';
+export const AEO_BRANCH = 'llms-ink/aeo-fixes';
+export const CONTEXT_BRANCH = 'llms-ink/context';
+/** `commit-message` when it isn't set: also the pull request title. */
+const MESSAGES = { aeo: 'Fix agent access (llms.ink report)', context: 'Update dependency docs in .context' };
 const COMMENT_LIMIT = 60_000;
 
 /** Inputs as the composite step passes them: INPUT_<NAME> with dashes as underscores. Defaults match action.yml. */
 export function readInputs(env) {
   const get = (name, fallback = '') => (env[`INPUT_${name.toUpperCase().replace(/-/g, '_')}`] ?? '').trim() || fallback;
   const bool = (name, fallback) => get(name, String(fallback)).toLowerCase() === 'true';
+  const mode = get('mode', 'write').toLowerCase();
   return {
     url: get('url'),
     path: get('path', 'llms.txt'),
@@ -22,14 +30,25 @@ export function readInputs(env) {
     pathSet: get('path') !== '',
     fullPath: get('full-path'),
     fresh: bool('fresh', true),
-    mode: get('mode', 'write').toLowerCase(),
+    mode,
     apiKey: get('api-key'),
     generated: bool('generated', false),
-    commitMessage: get('commit-message', 'Update llms.txt'),
+    commitMessage: get('commit-message', MESSAGES[mode] ?? 'Update llms.txt'),
     branch: get('branch'),
     token: get('token'),
     checkTarget: get('check-target', 'auto').toLowerCase(),
     links: bool('links', true),
+    aeoFailOn: get('aeo-fail-on', 'fail').toLowerCase(),
+    autofix: bool('autofix', false),
+    autofixDir: get('autofix-dir'),
+    indexnowKey: get('indexnow-key'),
+    indexnowUrls: get('indexnow-urls'),
+    indexnowKeyLocation: get('indexnow-key-location'),
+    contextDir: get('context-dir', '.context'),
+    contextMax: get('context-max', '10'),
+    manifests: get('manifests').split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
+    /** `none` skips the AGENTS.md block. */
+    agentsMd: /^(none|false)$/i.test(get('agents-md')) ? '' : get('agents-md', 'AGENTS.md'),
   };
 }
 
@@ -52,15 +71,16 @@ const fence = (text) => '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(
 /**
  * Run the action.
  * @param {{ env: Record<string,string|undefined>, fetch: typeof fetch, sleep?: (ms:number)=>Promise<void>,
- *   stdout?: (s:string)=>void }} deps
+ *   stdout?: (s:string)=>void, exec?: (cmd:string, args:string[], opts:{cwd:string, env:object})=>Promise<number> }} deps
+ *   `exec` runs the llms.ink CLI in `context` mode.
  * @returns {Promise<{ ok: boolean, outputs: Record<string,string> }>}
  */
-export async function run({ env, fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), stdout = (s) => process.stdout.write(s) }) {
+export async function run({ env, fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), stdout = (s) => process.stdout.write(s), exec = spawnExec }) {
   const log = (s) => stdout(`${s}\n`);
   /** `props`: extra properties before `title`, each ending in a comma, e.g. `file=llms.txt,line=3,`. */
   const annotate = (level, title, message, props = '') => log(`::${level} ${props}title=${prop(title)}::${esc(message)}`);
   const inputs = readInputs(env);
-  const outputs = { changed: 'false', tokens: '', path: '', 'pr-url': '', source: '', pages: '' };
+  const outputs = { changed: 'false', tokens: '', path: '', 'pr-url': '', source: '', pages: '', 'aeo-fail': '', 'aeo-warn': '', 'indexnow-submitted': '' };
   const summary = [];
   const cwd = env.GITHUB_WORKSPACE || process.cwd();
   const at = (p) => resolve(cwd, p);
@@ -72,179 +92,338 @@ export async function run({ env, fetch, sleep = (ms) => new Promise((r) => setTi
   };
 
   try {
-    if (!inputs.url) throw new Error('`url` is required.');
+    if (!inputs.url && inputs.mode !== 'context') throw new Error('`url` is required.');
     if (!MODES.includes(inputs.mode)) throw new Error(`\`mode\` must be one of ${MODES.join(', ')}; got \`${inputs.mode}\`.`);
+    if (inputs.mode === 'indexnow' && !inputs.indexnowKey) throw new Error('`mode: indexnow` needs `indexnow-key`.');
     if (inputs.apiKey) log(`::add-mask::${inputs.apiKey}`);
     const deps = { fetch, sleep, apiKey: inputs.apiKey, api: env.LLMS_INK_API || undefined };
+    const github = () => gitHub({ token: inputs.token, repository: env.GITHUB_REPOSITORY ?? '', api: env.GITHUB_API_URL, fetch });
+    const c = { inputs, env, deps, fetch, exec, log, annotate, summary, outputs, cwd, at, github };
 
-    if (inputs.mode === 'check') {
-      if (!CHECK_TARGETS.includes(inputs.checkTarget)) {
-        throw new Error(`\`check-target\` must be one of ${CHECK_TARGETS.join(', ')}; got \`${inputs.checkTarget}\`.`);
-      }
-      const fileExists = existsSync(at(inputs.path));
-      if (inputs.checkTarget === 'file' && !fileExists) throw new Error(`\`${inputs.path}\` doesn’t exist in the workspace. Check out the repository first.`);
-      const useFile = inputs.checkTarget === 'file' || (inputs.checkTarget === 'auto' && inputs.pathSet && fileExists);
-      const file = useFile ? inputs.path : null;
-      const result = file
-        ? await checkText(readFileSync(at(file), 'utf8'), { base: inputs.url, links: inputs.links }, deps)
-        : await check(inputs.url, deps);
-      const where = file ? `file=${prop(file)},` : '';
-      checkSummary(file ? `\`${file}\`` : inputs.url, result, summary, file);
-      outputs.tokens = String(result.tokens);
-      for (const i of result.issues) {
-        const level = i.level === 'error' ? 'error' : i.level === 'warning' ? 'warning' : 'notice';
-        const line = file && i.line ? `line=${i.line},` : '';
-        annotate(level, `llms.txt ${i.code}${i.line ? ` (line ${i.line})` : ''}`, i.message, `${where}${line}`);
-      }
-      const lineOf = new Map((result.parsed?.sections ?? []).flatMap((s) => s.links.map((l) => [l.url, l.line])));
-      for (const b of result.links.broken) {
-        const line = file && lineOf.has(b.url) ? `line=${lineOf.get(b.url)},` : '';
-        annotate('error', 'llms.txt broken_link', `${b.url} (HTTP ${b.status || 'no answer'})`, `${where}${line}`);
-      }
-      const failed = checkFailed(result);
-      log(
-        `Checked ${file ?? result.url}: ${result.summary.errors} errors, ${result.summary.warnings} warnings, ` +
-          `${result.links.broken.length} of ${result.links.checked} links broken.`,
-      );
-      return finish(!failed);
-    }
-
-    // commit and pr: check the token, paths and branch before spending quota.
-    const paths = [inputs.path, ...(inputs.fullPath && inputs.mode !== 'comment' ? [inputs.fullPath] : [])];
-    let gh;
-    let target;
-    if (inputs.mode === 'commit' || inputs.mode === 'pr') {
-      for (const p of paths) repoPath(p);
-      gh = gitHub({ token: inputs.token, repository: env.GITHUB_REPOSITORY ?? '', api: env.GITHUB_API_URL, fetch });
-      target = await currentBranch(env, inputs, gh);
-      if (inputs.mode === 'pr' && (inputs.branch || PR_BRANCH) === target)
-        throw new Error(`The PR branch \`${target}\` is the branch it would merge into; set \`branch\`.`);
-      // After a deploy of our own llms.txt commit (or of the merged PR), nothing else shipped: regenerating could
-      // only reword the file and commit again, deploy again, and so on.
-      const deployed = deployedSha(env);
-      if (deployed) {
-        const touched = await gh.commitFiles(deployed);
-        if (touched.length && touched.every((f) => paths.map(repoPath).includes(f))) {
-          log(`The deployed commit ${deployed.slice(0, 7)} only changed ${touched.join(', ')}; nothing to regenerate.`);
-          summary.push(`### llms.txt for ${inputs.url}`, '', `Skipped: the deployed commit \`${deployed.slice(0, 7)}\` only changed ${touched.map((f) => `\`${f}\``).join(', ')}.`, '');
-          return finish(true);
-        }
-      }
-    }
-
-    // Generate.
-    const gen = await generate(inputs.url, { mode: 'llms', fresh: inputs.fresh, generated: inputs.generated }, deps);
-    outputs.tokens = String(gen.tokens);
-    outputs.source = gen.source;
-    outputs.pages = String(gen.pages);
-    const files = { [inputs.path]: gen.text };
-    log(`Generated llms.txt (${gen.source}, ${gen.pages} links, ~${gen.tokens} tokens)`);
-    if (inputs.fullPath && inputs.mode !== 'comment') {
-      const full = await generate(inputs.url, { mode: 'full', fresh: inputs.fresh, generated: inputs.generated }, deps);
-      files[inputs.fullPath] = full.text;
-      log(`Generated llms-full.txt (${full.source}, ${full.pages} pages, ~${full.tokens} tokens)`);
-    }
-
-    const local = (p) => (existsSync(at(p)) ? readFileSync(at(p), 'utf8') : null);
-    const writeAll = () => {
-      for (const [p, text] of Object.entries(files)) {
-        mkdirSync(dirname(at(p)), { recursive: true });
-        writeFileSync(at(p), text);
-        log(`Wrote ${p}`);
-      }
-      outputs.path = inputs.path;
-    };
-
-    // Baseline for `changed` and the section diff: the local file (write, comment) or the file on the target
-    // branch (commit, pr).
-    const before = {};
-    for (const p of Object.keys(files)) before[p] = gh ? await gh.file(repoPath(p), target) : local(p);
-    const changed = Object.entries(files).some(([p, text]) => before[p] !== text);
-    outputs.changed = String(changed);
-    const diff = diffSections(before[inputs.path], gen.text);
-    log(before[inputs.path] == null ? `${inputs.path} is new.` : `${describeDiff(diff)} in ${inputs.path}.`);
-
-    const facts = [
-      ['Mode', `\`${inputs.mode}\``],
-      ['Source', gen.source === 'native' ? 'The site’s own llms.txt (copied)' : 'Generated by llms.ink'],
-      ['Tokens', `${gen.tokens}${before[inputs.path] != null ? ` (was ~${tokensOf(before[inputs.path])})` : ''}`],
-      ['Sections', String(countSections(gen.text))],
-      ['Links', String(gen.pages)],
-    ];
-
-    if (inputs.mode === 'write') {
-      writeAll();
-      facts.push(['File', `\`${inputs.path}\` ${changed ? 'updated' : 'unchanged'}`]);
-    } else if (inputs.mode === 'commit') {
-      writeAll();
-      if (changed) {
-        const parent = await gh.branchSha(target);
-        if (!parent) throw new Error(`Branch \`${target}\` doesn’t exist.`);
-        const sha = await gh.commit(parent, repoFiles(files), inputs.commitMessage);
-        if (sha) {
-          await gh.setBranch(target, sha);
-          log(`Committed ${sha.slice(0, 7)} to ${target}`);
-          facts.push(['Commit', `\`${sha.slice(0, 7)}\` on \`${target}\``]);
-        }
-      } else facts.push(['Commit', `None: \`${inputs.path}\` on \`${target}\` is current`]);
-    } else if (inputs.mode === 'pr') {
-      writeAll();
-      const head = inputs.branch || PR_BRANCH;
-      if (changed) {
-        const baseSha = await gh.branchSha(target);
-        const headSha = await gh.branchSha(head);
-        const sha = await gh.commit(baseSha, repoFiles(files), inputs.commitMessage, headSha ? await gh.treeOf(headSha) : undefined);
-        if (sha) {
-          await gh.setBranch(head, sha, { force: true, exists: !!headSha });
-          log(`Pushed ${sha.slice(0, 7)} to ${head}`);
-        } else log(`${head} already has this llms.txt`);
-        const body = prBody(inputs, gen, diff, before[inputs.path]);
-        let pr = await gh.openPull(head, target);
-        if (pr) await gh.updatePull(pr.number, body);
-        else {
-          try {
-            pr = await gh.createPull(head, target, inputs.commitMessage, body);
-          } catch (err) {
-            if (err.status === 403)
-              err.message += ' Allow it under Settings → Actions → General → “Allow GitHub Actions to create and approve pull requests”, and give the job `pull-requests: write`.';
-            throw err;
-          }
-        }
-        outputs['pr-url'] = pr.html_url;
-        log(`Pull request: ${pr.html_url}`);
-        facts.push(['Pull request', pr.html_url]);
-      } else {
-        const pr = await gh.openPull(head, target);
-        if (pr) outputs['pr-url'] = pr.html_url;
-        facts.push(['Pull request', `None needed: \`${inputs.path}\` on \`${target}\` is current`]);
-      }
-    } else {
-      // comment
-      const number = pullNumber(env);
-      const body = commentBody(inputs, gen, diff, before[inputs.path]);
-      if (!number) annotate('warning', 'llms.ink', '`mode: comment` runs on pull_request events; no comment posted.');
-      else {
-        try {
-          gh = gitHub({ token: inputs.token, repository: env.GITHUB_REPOSITORY ?? '', api: env.GITHUB_API_URL, fetch });
-          const c = await gh.stickyComment(number, marker(inputs.path), body);
-          log(`Comment: ${c.html_url}`);
-          facts.push(['Comment', c.html_url]);
-        } catch (err) {
-          // Differences never fail the job; neither does a token that can't comment (PRs from forks).
-          annotate('warning', 'llms.ink', `Couldn’t comment on #${number}: ${err.message}. The job needs \`pull-requests: write\`.`);
-        }
-      }
-    }
-
-    summary.push(`### llms.txt for ${inputs.url}`, '', '| | |', '|---|---|', ...facts.map(([k, v]) => `| ${k} | ${v} |`), '');
-    summary.push(before[inputs.path] == null ? `\`${inputs.path}\` is new.` : `${describeDiff(diff)} in \`${inputs.path}\`.`, '');
-    if (before[inputs.path] != null && !diff.identical) summary.push(diffTable(diff), '');
-    return finish(true);
+    let ok = true;
+    if (inputs.mode === 'check') ok = await checkMode(c);
+    else if (inputs.mode === 'aeo') ok = await aeoMode(c);
+    else if (inputs.mode === 'context') ok = await contextMode(c);
+    else if (inputs.mode !== 'indexnow') ok = await llmsMode(c);
+    // IndexNow after the mode's own work (typically after a deploy): only when that work succeeded.
+    if (ok && inputs.indexnowKey) ok = await indexNow(c);
+    return finish(ok);
   } catch (err) {
     const title = err instanceof LlmsInkError && err.status ? `llms.ink (${err.status})` : 'llms.ink';
     annotate('error', title, err.message);
-    summary.push(`### llms.txt for ${inputs.url || '(no url)'}`, '', `Failed: ${err.message}`, '');
+    summary.push(`### ${heading(inputs)}`, '', `Failed: ${err.message}`, '');
     return finish(false);
+  }
+}
+
+function heading(inputs) {
+  if (inputs.mode === 'aeo') return `Agent's-eye view of ${inputs.url || '(no url)'}`;
+  if (inputs.mode === 'context') return `Dependency docs in \`${inputs.contextDir}\``;
+  if (inputs.mode === 'indexnow') return `IndexNow for ${inputs.url || '(no url)'}`;
+  return `llms.txt for ${inputs.url || '(no url)'}`;
+}
+
+/** `check`: lint the workspace file or the published llms.txt. */
+async function checkMode({ inputs, deps, log, annotate, summary, outputs, at }) {
+  if (!CHECK_TARGETS.includes(inputs.checkTarget)) {
+    throw new Error(`\`check-target\` must be one of ${CHECK_TARGETS.join(', ')}; got \`${inputs.checkTarget}\`.`);
+  }
+  const fileExists = existsSync(at(inputs.path));
+  if (inputs.checkTarget === 'file' && !fileExists) throw new Error(`\`${inputs.path}\` doesn’t exist in the workspace. Check out the repository first.`);
+  const useFile = inputs.checkTarget === 'file' || (inputs.checkTarget === 'auto' && inputs.pathSet && fileExists);
+  const file = useFile ? inputs.path : null;
+  const result = file
+    ? await checkText(readFileSync(at(file), 'utf8'), { base: inputs.url, links: inputs.links }, deps)
+    : await check(inputs.url, deps);
+  const where = file ? `file=${prop(file)},` : '';
+  checkSummary(file ? `\`${file}\`` : inputs.url, result, summary, file);
+  outputs.tokens = String(result.tokens);
+  for (const i of result.issues) {
+    const level = i.level === 'error' ? 'error' : i.level === 'warning' ? 'warning' : 'notice';
+    const line = file && i.line ? `line=${i.line},` : '';
+    annotate(level, `llms.txt ${i.code}${i.line ? ` (line ${i.line})` : ''}`, i.message, `${where}${line}`);
+  }
+  const lineOf = new Map((result.parsed?.sections ?? []).flatMap((s) => s.links.map((l) => [l.url, l.line])));
+  for (const b of result.links.broken) {
+    const line = file && lineOf.has(b.url) ? `line=${lineOf.get(b.url)},` : '';
+    annotate('error', 'llms.txt broken_link', `${b.url} (HTTP ${b.status || 'no answer'})`, `${where}${line}`);
+  }
+  const failed = checkFailed(result);
+  log(
+    `Checked ${file ?? result.url}: ${result.summary.errors} errors, ${result.summary.warnings} warnings, ` +
+      `${result.links.broken.length} of ${result.links.checked} links broken.`,
+  );
+  return !failed;
+}
+
+/** `write`, `commit`, `pr` and `comment`: generate llms.txt (and llms-full.txt) and put it where the mode says. */
+async function llmsMode({ inputs, env, deps, log, annotate, summary, outputs, at, github }) {
+  // commit and pr: check the token, paths and branch before spending quota.
+  const paths = [inputs.path, ...(inputs.fullPath && inputs.mode !== 'comment' ? [inputs.fullPath] : [])];
+  let gh;
+  let target;
+  if (inputs.mode === 'commit' || inputs.mode === 'pr') {
+    for (const p of paths) repoPath(p);
+    gh = github();
+    target = await currentBranch(env, inputs, gh);
+    if (inputs.mode === 'pr' && (inputs.branch || PR_BRANCH) === target)
+      throw new Error(`The PR branch \`${target}\` is the branch it would merge into; set \`branch\`.`);
+    // After a deploy of our own llms.txt commit (or of the merged PR), nothing else shipped: regenerating could
+    // only reword the file and commit again, deploy again, and so on.
+    const deployed = deployedSha(env);
+    if (deployed) {
+      const touched = await gh.commitFiles(deployed);
+      if (touched.length && touched.every((f) => paths.map(repoPath).includes(f))) {
+        log(`The deployed commit ${deployed.slice(0, 7)} only changed ${touched.join(', ')}; nothing to regenerate.`);
+        summary.push(`### llms.txt for ${inputs.url}`, '', `Skipped: the deployed commit \`${deployed.slice(0, 7)}\` only changed ${touched.map((f) => `\`${f}\``).join(', ')}.`, '');
+        return true;
+      }
+    }
+  }
+
+  // Generate.
+  const gen = await generate(inputs.url, { mode: 'llms', fresh: inputs.fresh, generated: inputs.generated }, deps);
+  outputs.tokens = String(gen.tokens);
+  outputs.source = gen.source;
+  outputs.pages = String(gen.pages);
+  const files = { [inputs.path]: gen.text };
+  log(`Generated llms.txt (${gen.source}, ${gen.pages} links, ~${gen.tokens} tokens)`);
+  if (inputs.fullPath && inputs.mode !== 'comment') {
+    const full = await generate(inputs.url, { mode: 'full', fresh: inputs.fresh, generated: inputs.generated }, deps);
+    files[inputs.fullPath] = full.text;
+    log(`Generated llms-full.txt (${full.source}, ${full.pages} pages, ~${full.tokens} tokens)`);
+  }
+
+  const local = (p) => (existsSync(at(p)) ? readFileSync(at(p), 'utf8') : null);
+  const writeAll = () => {
+    for (const [p, text] of Object.entries(files)) {
+      mkdirSync(dirname(at(p)), { recursive: true });
+      writeFileSync(at(p), text);
+      log(`Wrote ${p}`);
+    }
+    outputs.path = inputs.path;
+  };
+
+  // Baseline for `changed` and the section diff: the local file (write, comment) or the file on the target
+  // branch (commit, pr).
+  const before = {};
+  for (const p of Object.keys(files)) before[p] = gh ? await gh.file(repoPath(p), target) : local(p);
+  const changed = Object.entries(files).some(([p, text]) => before[p] !== text);
+  outputs.changed = String(changed);
+  const diff = diffSections(before[inputs.path], gen.text);
+  log(before[inputs.path] == null ? `${inputs.path} is new.` : `${describeDiff(diff)} in ${inputs.path}.`);
+
+  const facts = [
+    ['Mode', `\`${inputs.mode}\``],
+    ['Source', gen.source === 'native' ? 'The site’s own llms.txt (copied)' : 'Generated by llms.ink'],
+    ['Tokens', `${gen.tokens}${before[inputs.path] != null ? ` (was ~${tokensOf(before[inputs.path])})` : ''}`],
+    ['Sections', String(countSections(gen.text))],
+    ['Links', String(gen.pages)],
+  ];
+
+  if (inputs.mode === 'write') {
+    writeAll();
+    facts.push(['File', `\`${inputs.path}\` ${changed ? 'updated' : 'unchanged'}`]);
+  } else if (inputs.mode === 'commit') {
+    writeAll();
+    if (changed) {
+      const parent = await gh.branchSha(target);
+      if (!parent) throw new Error(`Branch \`${target}\` doesn’t exist.`);
+      const sha = await gh.commit(parent, repoFiles(files), inputs.commitMessage);
+      if (sha) {
+        await gh.setBranch(target, sha);
+        log(`Committed ${sha.slice(0, 7)} to ${target}`);
+        facts.push(['Commit', `\`${sha.slice(0, 7)}\` on \`${target}\``]);
+      }
+    } else facts.push(['Commit', `None: \`${inputs.path}\` on \`${target}\` is current`]);
+  } else if (inputs.mode === 'pr') {
+    writeAll();
+    const head = inputs.branch || PR_BRANCH;
+    if (changed) {
+      const body = prBody(inputs, gen, diff, before[inputs.path]);
+      const { pr, pushed } = await proposePull(gh, { head, base: target, files: repoFiles(files), message: inputs.commitMessage, body });
+      log(pushed ? `Pushed ${pushed.slice(0, 7)} to ${head}` : `${head} already has this llms.txt`);
+      outputs['pr-url'] = pr.html_url;
+      log(`Pull request: ${pr.html_url}`);
+      facts.push(['Pull request', pr.html_url]);
+    } else {
+      const pr = await gh.openPull(head, target);
+      if (pr) outputs['pr-url'] = pr.html_url;
+      facts.push(['Pull request', `None needed: \`${inputs.path}\` on \`${target}\` is current`]);
+    }
+  } else {
+    // comment
+    const number = pullNumber(env);
+    const body = commentBody(inputs, gen, diff, before[inputs.path]);
+    if (!number) annotate('warning', 'llms.ink', '`mode: comment` runs on pull_request events; no comment posted.');
+    else {
+      try {
+        const c = await github().stickyComment(number, marker(inputs.path), body);
+        log(`Comment: ${c.html_url}`);
+        facts.push(['Comment', c.html_url]);
+      } catch (err) {
+        // Differences never fail the job; neither does a token that can't comment (PRs from forks).
+        annotate('warning', 'llms.ink', `Couldn’t comment on #${number}: ${err.message}. The job needs \`pull-requests: write\`.`);
+      }
+    }
+  }
+
+  summary.push(`### llms.txt for ${inputs.url}`, '', '| | |', '|---|---|', ...facts.map(([k, v]) => `| ${k} | ${v} |`), '');
+  summary.push(before[inputs.path] == null ? `\`${inputs.path}\` is new.` : `${describeDiff(diff)} in \`${inputs.path}\`.`, '');
+  if (before[inputs.path] != null && !diff.identical) summary.push(diffTable(diff), '');
+  return true;
+}
+
+/**
+ * `aeo`: the agent's-eye report as annotations, job summary and (on pull requests) one sticky comment; with
+ * `autofix`, a pull request with its robots.txt, _headers and llms.txt fixes. Fails per `aeo-fail-on`.
+ */
+async function aeoMode({ inputs, env, deps, log, annotate, summary, outputs, github }) {
+  if (!AEO_FAIL_ON.includes(inputs.aeoFailOn)) throw new Error(`\`aeo-fail-on\` must be one of ${AEO_FAIL_ON.join(', ')}; got \`${inputs.aeoFailOn}\`.`);
+  const r = await report(inputs.url, deps);
+  const { pass = 0, warn = 0, fail = 0, info = 0 } = r.summary ?? {};
+  outputs['aeo-fail'] = String(fail);
+  outputs['aeo-warn'] = String(warn);
+  for (const c of checksOf(r)) {
+    if (c.status !== 'fail' && c.status !== 'warn') continue;
+    const level = c.status === 'warn' || inputs.aeoFailOn === 'none' ? 'warning' : 'error';
+    annotate(level, `${c.sectionTitle ?? c.section}: ${c.title}`, `${c.detail ?? ''}${c.fix?.summary ? ` Fix: ${c.fix.summary}` : ''}`.trim());
+  }
+  log(`Report for ${r.url ?? inputs.url}: ${fail} failed, ${warn} warnings, ${pass} passed, ${info} notes.`);
+  const body = reportMarkdown(inputs.url, r);
+  summary.push(body);
+
+  const number = pullNumber(env);
+  if (number) {
+    try {
+      const comment = await github().stickyComment(number, aeoMarker(inputs.url), `${aeoMarker(inputs.url)}\n${body}`);
+      log(`Comment: ${comment.html_url}`);
+    } catch (err) {
+      annotate('warning', 'llms.ink', `Couldn’t comment on #${number}: ${err.message}. The job needs \`pull-requests: write\`.`);
+    }
+  }
+
+  if (inputs.autofix) {
+    const gh = github();
+    const target = await currentBranch(env, inputs, gh);
+    const head = inputs.branch || AEO_BRANCH;
+    if (head === target) throw new Error(`The autofix branch \`${target}\` is the branch it would merge into; set \`branch\`.`);
+    const baseSha = await gh.branchSha(target);
+    if (!baseSha) throw new Error(`Branch \`${target}\` doesn’t exist.`);
+    const { files, applied, skipped } = fixFiles(r, { dir: inputs.autofixDir, repoFiles: Object.keys(await gh.blobs(baseSha)) });
+    for (const { check: c, reason } of skipped) log(`Not applied: ${c.title} (${reason}).`);
+    const changes = {};
+    for (const [path, content] of Object.entries(files)) if ((await gh.file(path, target)) !== content) changes[path] = content;
+    const fixes = applied.filter((c) => c.path in changes);
+    if (fixes.length) {
+      const { pr } = await proposePull(gh, { head, base: target, files: changes, message: inputs.commitMessage, body: fixBody(inputs.url, fixes, skipped) });
+      outputs.changed = 'true';
+      outputs['pr-url'] = pr.html_url;
+      log(`Autofix pull request: ${pr.html_url}`);
+      summary.push(`Autofix: ${pr.html_url} changes ${Object.keys(changes).map((p) => `\`${p}\``).join(', ')}.`, '');
+    } else {
+      const pr = await gh.openPull(head, target);
+      if (pr) outputs['pr-url'] = pr.html_url;
+      log(applied.length ? `Autofix: \`${target}\` already has every fix.` : 'Autofix: no robots.txt, _headers or llms.txt fixes in the report.');
+      summary.push(`Autofix: nothing to change${skipped.length ? ` (${skipped.length} fix${skipped.length === 1 ? '' : 'es'} need a hand edit)` : ''}.`, '');
+    }
+  }
+  return !aeoFailed(r, inputs.aeoFailOn);
+}
+
+/** `context`: run `llms-ink context`, then propose `.context/` and the AGENTS.md block as a pull request when they changed. */
+async function contextMode({ inputs, env, exec, log, summary, outputs, cwd, github }) {
+  const dir = repoPath(inputs.contextDir);
+  const agentsMd = inputs.agentsMd ? repoPath(inputs.agentsMd) : '';
+  for (const m of inputs.manifests) repoPath(m);
+  if (!/^\d+$/.test(inputs.contextMax) || Number(inputs.contextMax) < 1) throw new Error('`context-max` must be a positive whole number.');
+  const gh = github();
+  const target = await currentBranch(env, inputs, gh);
+  const head = inputs.branch || CONTEXT_BRANCH;
+  if (head === target) throw new Error(`The context branch \`${target}\` is the branch it would merge into; set \`branch\`.`);
+
+  const args = contextArgs({ manifests: inputs.manifests, dir, max: inputs.contextMax, agentsMd });
+  log(`Running npx ${args.join(' ')}`);
+  const childEnv = { ...env, ...(inputs.apiKey ? { LLMS_INK_KEY: inputs.apiKey } : {}) };
+  const code = await exec('npx', args, { cwd, env: childEnv });
+  if (code !== 0) throw new Error(`\`llms-ink context\` exited with code ${code}.`);
+
+  const baseSha = await gh.branchSha(target);
+  if (!baseSha) throw new Error(`Branch \`${target}\` doesn’t exist.`);
+  const changes = contextChanges(cwd, { dir, agentsMd }, await gh.blobs(baseSha));
+  const paths = Object.keys(changes).sort();
+  outputs.changed = String(paths.length > 0);
+  const lines = paths.map((p) => `- \`${p}\` ${changes[p] === null ? 'removed' : 'updated'}`);
+  if (paths.length) {
+    const body = [
+      `Refreshed version-pinned docs for this repo's dependencies with [llms.ink](https://llms.ink) (\`llms-ink context\`): sources are listed in each file.`,
+      '',
+      ...lines,
+      '',
+      'Opened by [lukax/llms-txt-action](https://github.com/lukax/llms-txt-action). Later runs update this branch and PR.',
+    ].join('\n');
+    const { pr } = await proposePull(gh, { head, base: target, files: changes, message: inputs.commitMessage, body });
+    outputs['pr-url'] = pr.html_url;
+    log(`Pull request: ${pr.html_url}`);
+    summary.push(`### ${heading(inputs)}`, '', `${paths.length} file${paths.length === 1 ? '' : 's'} changed: ${pr.html_url}`, '', ...lines, '');
+  } else {
+    const pr = await gh.openPull(head, target);
+    if (pr) outputs['pr-url'] = pr.html_url;
+    log(`\`${dir}\` on \`${target}\` is current.`);
+    summary.push(`### ${heading(inputs)}`, '', `No changes: \`${dir}\`${agentsMd ? ` and \`${agentsMd}\`` : ''} on \`${target}\` are current.`, '');
+  }
+  return true;
+}
+
+/**
+ * IndexNow: `indexnow-urls`, or the pages the deployed (or pushed) commit changed, matched against the sitemap.
+ * Checks the key file first. Failures fail the job with the reason.
+ */
+async function indexNow({ inputs, env, fetch, log, annotate, summary, outputs, github }) {
+  const site = new URL(/^https?:\/\//i.test(inputs.url) ? inputs.url : `https://${inputs.url}`).origin;
+  const lines = [`### IndexNow for ${site}`, ''];
+  try {
+    const keyFile = await checkKey(fetch, { key: inputs.indexnowKey, site, keyLocation: inputs.indexnowKeyLocation });
+    let urls;
+    if (inputs.indexnowUrls) {
+      urls = parseUrls(inputs.indexnowUrls, site);
+      lines.push(`${urls.length} URL${urls.length === 1 ? '' : 's'} from \`indexnow-urls\`.`);
+    } else {
+      const sha = deployedSha(env) ?? (env.GITHUB_EVENT_NAME === 'push' ? env.GITHUB_SHA : null);
+      if (!sha) {
+        annotate('warning', 'IndexNow', 'No `indexnow-urls` and no deployed or pushed commit to read changes from: nothing submitted.');
+        summary.push(...lines, 'Nothing submitted: no `indexnow-urls`, and this event has no deployed commit.', '');
+        outputs['indexnow-submitted'] = '0';
+        return true;
+      }
+      const files = await github().commitFiles(sha);
+      const pages = await sitemapUrls(fetch, site);
+      urls = changedUrls(files, pages);
+      lines.push(`${files.length} file${files.length === 1 ? '' : 's'} changed in \`${sha.slice(0, 7)}\`; ${urls.length} of ${pages.length} sitemap URLs match.`);
+    }
+    if (!urls.length) {
+      log('IndexNow: no changed URLs to submit.');
+      outputs['indexnow-submitted'] = '0';
+      summary.push(...lines, '', 'Nothing submitted.', '');
+      return true;
+    }
+    const { sent, dropped } = await submit(fetch, {
+      key: inputs.indexnowKey,
+      site,
+      keyLocation: inputs.indexnowKeyLocation ? keyFile : undefined,
+      urls,
+      endpoint: env.INDEXNOW_API || INDEXNOW_API,
+    });
+    outputs['indexnow-submitted'] = String(sent);
+    log(`IndexNow: submitted ${sent} URL${sent === 1 ? '' : 's'}${dropped ? ` (${dropped} on other hosts skipped)` : ''}.`);
+    const shown = urls.slice(0, 50).map((u) => `- ${u}`);
+    summary.push(...lines, '', `Submitted ${sent}${dropped ? ` (${dropped} on other hosts skipped)` : ''}:`, '', ...shown, ...(urls.length > 50 ? [`- … and ${urls.length - 50} more`] : []), '');
+    return true;
+  } catch (err) {
+    if (!(err instanceof IndexNowError)) throw err;
+    annotate('error', 'IndexNow', err.message);
+    summary.push(...lines, `Failed: ${err.message}`, '');
+    return false;
   }
 }
 
