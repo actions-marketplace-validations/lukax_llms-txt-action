@@ -39,3 +39,9 @@ test('retry is bounded, respects capacity hints, and does not retry exhausted da
  const f=fixture(t,undefined,{},(r,init,n)=>n<3?Response.json({},{status:429,headers:{'retry-after':'5'}}):Response.json(r));assert.equal((await f.go()).ok,true);assert.equal(f.calls(),3);
  const q=fixture(t,undefined,{},()=>Response.json({},{status:429,headers:{'retry-after':'3600'}}));assert.equal((await q.go()).ok,false);assert.equal(q.calls(),1);
 });
+
+test('shared receipt conformance corpus',async()=>{
+ const {validateReceipt}=await import('../src/inspect.mjs');
+ const {cases}=JSON.parse(readFileSync(new URL('fixtures/inspect-receipts-v1.json',import.meta.url)));
+ for(const c of cases)assert.equal(validateReceipt(c.receipt,c.digest,c.status),c.valid,c.name);
+});

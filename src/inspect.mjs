@@ -1,3 +1,4 @@
+import { inspectionReceipt } from './inspect-contract.mjs';
 // Opt-in hosted inspection. Only explicitly named files are sent; no repository crawl.
 import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -32,12 +33,8 @@ function readFileInside(cwd, file) {
   } finally { closeSync(fd); }
 }
 
-export function validateReceipt(r, digest) {
-  if (!r || r.contentDigest !== digest || r.modelRevision !== '4a43fec65a670e48835d8e8c85c705b4b0d1c907' || r.policyRevision !== 'llms-ink-inspect-1' || r.preprocessingRevision !== 'utf8-json-stringify-1' || r.enforced !== false) return false;
-  if (!Number.isInteger(r.inputTokens) || r.inputTokens < 0 || !Number.isInteger(r.inspectedTokens) || r.inspectedTokens < 0 || r.inspectedTokens > r.inputTokens || !Number.isInteger(r.windows) || r.windows < 0 || r.windows > 43) return false;
-  if (r.detection === 'no_finding') return r.coverage === 'complete' && r.recommendation === 'continue' && r.reason === 'no_finding' && r.inputTokens <= 8192 && r.inspectedTokens === r.inputTokens && (r.inputTokens === 0 || r.windows > 0);
-  if (r.detection === 'flagged') return ['complete','partial'].includes(r.coverage) && r.recommendation === 'withhold' && ['instruction_pattern','model_detection'].includes(r.reason) && r.inputTokens <= 8192 && r.inspectedTokens > 0 && r.windows > 0;
-  return r.detection === 'unknown' && r.coverage === 'none' && r.recommendation === 'withhold' && r.inspectedTokens === 0 && ['token_limit','model_unavailable','model_failure','inspection_timeout'].includes(r.reason);
+export function validateReceipt(r, digest, status = 200) {
+  try { inspectionReceipt(r, digest, status); return true; } catch { return false; }
 }
 
 async function boundedJson(response) {
@@ -90,7 +87,7 @@ export async function inspectMode({inputs, env, fetch, summary, outputs, annotat
         await deps.sleep(retry * 1000);
       }
       const r = await boundedJson(response);
-      if (![200,422,503].includes(response.status) || !validateReceipt(r,file.contentDigest) || (response.status !== 200 && r.detection !== 'unknown')) throw new Error('No valid receipt');
+      if (![200,422,503].includes(response.status) || !validateReceipt(r,file.contentDigest,response.status) || (response.status !== 200 && r.detection !== 'unknown')) throw new Error('No valid receipt');
       const {detection,coverage,recommendation,reason,modelRevision,policyRevision,preprocessingRevision,contentDigest,inputTokens,inspectedTokens,windows,enforced}=r;
       receipt={detection,coverage,recommendation,reason,modelRevision,policyRevision,preprocessingRevision,contentDigest,inputTokens,inspectedTokens,windows,enforced};
     } catch {

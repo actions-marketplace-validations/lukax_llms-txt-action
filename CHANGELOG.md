@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1
+
+- Use the shared SDK receipt validator and conformance corpus.
+- Reject unsafe integer counts, nonzero windows on unknown results and incomplete counters labeled as complete flagged coverage.
+- Preserve withhold-on-error behavior, explicit uploads and existing workflows.
+
 ## 1.4.0
 
 - Add opt-in `mode: inspect` for explicit text/JSON files using the authenticated llms.ink Inspect pilot.

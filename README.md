@@ -450,7 +450,7 @@ serves llms.ink and the GitHub API from memory.
 
 MIT
 
-## Hosted inspection (experimental, v1.4.0)
+## Hosted inspection (experimental, v1.4.1)
 
 `mode: inspect` sends **only explicitly selected files** to the llms.ink Inspect API. It needs an inspection-enabled key and is an explicit choice to process that content on llms.ink infrastructure. The local MCP guard remains available for on-device scanning.
 
@@ -464,7 +464,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: lukax/llms-txt-action@v1.4.0
+      - uses: lukax/llms-txt-action@v1.4.1
         id: inspection
         with:
           mode: inspect
@@ -483,3 +483,5 @@ Outputs: `inspection-clean`, `inspection-flagged`, `inspection-unknown`, and `in
 For same-repository PRs, use `pull_request` and keep `contents: read`; fork PRs generally lack the secret and fail inspection. This mode refuses `pull_request_target`. Never run untrusted repository code with an inspection secret. The inspection destination is fixed to `https://llms.ink/api/v0/inspect`; `LLMS_INK_API` does not override it. Capacity errors with a bounded `Retry-After` can retry twice; no response is silently treated as clean.
 
 [Request pilot access, API limits and data handling](https://llms.ink/inspect/). Independent llms.ink integration using Pinata's model, not Pinata's Doorman desktop app.
+
+Inspection receipt parsing uses the shared llms.ink conformance corpus and generated SDK validator. Unknown counters, unsupported revisions and incomplete results cannot pass the job.
