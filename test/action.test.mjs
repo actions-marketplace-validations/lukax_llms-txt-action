@@ -47,7 +47,7 @@ test('action.yml: every input reaches the step as INPUT_*, with the same default
   const yml = readFileSync(fileURLToPath(new URL('../action.yml', import.meta.url)), 'utf8');
   const block = yml.slice(yml.indexOf('\ninputs:'), yml.indexOf('\noutputs:'));
   const names = [...block.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1]);
-  assert.deepEqual(names, ['url', 'path', 'full-path', 'fresh', 'mode', 'api-key', 'generated', 'commit-message', 'branch', 'token']);
+  assert.deepEqual(names, ['url', 'path', 'full-path', 'fresh', 'mode', 'api-key', 'generated', 'commit-message', 'branch', 'token', 'check-target', 'links']);
   const env = {};
   for (const name of names) {
     const envName = `INPUT_${name.toUpperCase().replace(/-/g, '_')}`;
@@ -161,6 +161,72 @@ test('check: fails on errors and on broken links; warnings alone pass', async ()
   const missing = await t.go();
   assert.equal(missing.ok, false);
   assert.match(missing.stdout, /::error title=llms.txt not_found::No llms.txt/);
+});
+
+test('check (auto): lints the workspace file via POST with base and links, annotates file and line, outlines it', async () => {
+  const t = setup({ mode: 'check', path: 'docs/llms.txt' });
+  mkdirSync(join(t.ws, 'docs'));
+  t.write('docs/llms.txt', LLMS_TXT);
+  t.mock.state.check.issues = [{ level: 'warning', code: 'long_line', line: 3, message: 'Too long' }];
+  t.mock.state.check.summary = { errors: 0, warnings: 1 };
+  t.mock.state.check.links.broken = [{ url: 'https://acme.test/api', status: 404 }];
+  const r = await t.go();
+  const [call] = llmsCalls(t.mock);
+  assert.equal(call.method, 'POST');
+  assert.equal(call.path, '/api/v0/check');
+  assert.deepEqual(call.query, { base: 'https://acme.test', links: '1' });
+  assert.equal(call.body, LLMS_TXT);
+  assert.match(call.headers['content-type'], /^text\/markdown/);
+  assert.equal(r.ok, false);
+  assert.match(r.stdout, /^::warning file=docs\/llms.txt,line=3,title=llms.txt long_line \(line 3\)::Too long$/m);
+  assert.match(r.stdout, /^::error file=docs\/llms.txt,line=8,title=llms.txt broken_link::https:\/\/acme.test\/api \(HTTP 404\)$/m);
+  assert.match(r.stdout, /Checked docs\/llms.txt:/);
+  assert.match(r.summary, /### llms.txt check for `docs\/llms.txt`/);
+  assert.match(r.summary, /\*\*Outline:\*\* Acme — Acme makes things\./);
+  assert.match(r.summary, /^\| Docs \| 2 \| 7 \|$/m);
+  assert.match(r.summary, /\| llms-full.txt \| Not published \|/);
+  assert.equal(t.read('docs/llms.txt'), LLMS_TXT, 'check never rewrites the file');
+});
+
+test('check (auto) without an explicit path: still checks the live site even with llms.txt in the workspace', async () => {
+  const t = setup({ mode: 'check' });
+  t.write('llms.txt', LLMS_TXT);
+  const r = await t.go();
+  assert.equal(r.ok, true);
+  const [call] = llmsCalls(t.mock);
+  assert.equal(call.method, 'GET');
+  assert.deepEqual(call.query, { url: 'https://acme.test' });
+});
+
+test('check: links=false, check-target live/file, bad target, missing file', async () => {
+  const t = setup({ mode: 'check', path: 'llms.txt', links: 'false' });
+  t.write('llms.txt', LLMS_TXT);
+  const noLinks = await t.go();
+  assert.equal(noLinks.ok, true);
+  assert.deepEqual(llmsCalls(t.mock).at(-1).query, { base: 'https://acme.test', links: '0' });
+  assert.match(noLinks.summary, /\| llms-full.txt \| Not checked \|/);
+
+  t.env.INPUT_CHECK_TARGET = 'live';
+  await t.go();
+  assert.equal(llmsCalls(t.mock).at(-1).method, 'GET');
+  assert.deepEqual(llmsCalls(t.mock).at(-1).query, { url: 'https://acme.test' });
+
+  const missing = setup({ mode: 'check', 'check-target': 'file' });
+  const m = await missing.go();
+  assert.equal(m.ok, false);
+  assert.match(m.stdout, /`llms.txt` doesn’t exist in the workspace/);
+  assert.equal(llmsCalls(missing.mock).length, 0);
+
+  const bad = await setup({ mode: 'check', 'check-target': 'remote' }).go();
+  assert.equal(bad.ok, false);
+  assert.match(bad.stdout, /`check-target` must be one of auto, file, live/);
+
+  const err = setup({ mode: 'check', 'check-target': 'file' });
+  err.write('llms.txt', '');
+  err.mock.state.checkPost = () => new Response(JSON.stringify({ title: 'Bad', status: 400, code: 'invalid_request', detail: 'The body is empty.' }), { status: 400 });
+  const e = await err.go();
+  assert.equal(e.ok, false);
+  assert.match(e.stdout, /The body is empty\./);
 });
 
 test('commit: commits to the current branch only when the file changed', async () => {

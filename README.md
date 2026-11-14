@@ -24,7 +24,7 @@ the free [llms.ink](https://llms.ink) API; an API key is optional.
 | `write` (default) | Writes `path` (and `full-path`) in the workspace. | llms.ink returns an error. |
 | `commit` | Writes the files, then commits them to the branch the workflow runs on (or `branch`) when they changed. | llms.ink or GitHub returns an error. |
 | `pr` | Writes the files, then pushes them to the branch `llms-ink/llms-txt` (or `branch`) and opens a pull request, or updates the open one. | llms.ink or GitHub returns an error. |
-| `check` | Checks the llms.txt the site publishes (format at llmstxt.org, first 25 links). Writes nothing. | The file is missing, has format errors, or has broken links. Warnings don't fail. |
+| `check` | Checks llms.txt (format at llmstxt.org, first 25 links): the one the site publishes, or the file at `path` in the checkout when you set `path` (see `check-target`). Writes nothing. | The file is missing, has format errors, or has broken links. Warnings don't fail. |
 | `comment` | On a pull request: generates llms.txt, compares it with `path` in the repository section by section, and posts one comment (updated on every run). Writes nothing. | llms.ink returns an error. Differences never fail it. |
 
 `commit` and `pr` work through the GitHub API, so they don't need a local `git` identity, and each run makes at most one
@@ -186,9 +186,38 @@ jobs:
 
 `fresh: false` reuses llms.ink's copy from the last 24 hours, so busy pull requests don't spend quota on every push.
 
+### Gate pull requests on llms.txt
+
+With the repository checked out and `path` set, `check` mode lints that file before you deploy it: format errors
+and broken links fail the pull request, with annotations on the file's lines. `url` resolves relative links and is
+where llms-full.txt is looked for.
+
+```yaml
+name: Check llms.txt
+on:
+  pull_request:
+    paths: [public/llms.txt]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukax/llms-txt-action@v1
+        with:
+          url: https://example.com
+          path: public/llms.txt
+          mode: check
+```
+
+`path` is what turns this on: without it, `check` mode keeps checking the live site. `links: false` checks only the
+format. `check-target: file` fails when the file is missing instead of falling back to
+the site.
+
 ### Gate CI on the published llms.txt
 
-Fail when the site's llms.txt is missing, breaks the format, or links to pages that don't load:
+Without `path` (or with `check-target: live`), `check` mode checks what the site publishes. Fail when it's
+missing, breaks the format, or links to pages that don't load:
 
 ```yaml
 name: Check llms.txt
@@ -207,8 +236,8 @@ jobs:
           mode: check
 ```
 
-Errors and warnings show up as annotations on the run, and the job summary lists every check. Checks don't count
-against the daily quota.
+Errors and warnings show up as annotations on the run, and the job summary lists every check and the file's outline
+(title, summary, sections and their link counts). Checks don't count against the daily quota.
 
 ### Use an API key
 
@@ -231,7 +260,7 @@ An invalid or revoked key fails the job with `401 invalid_key`; the action never
 | Input | Default | |
 |---|---|---|
 | `url` | (required) | The site, docs section, page or GitHub repo, e.g. `https://example.com` or `https://github.com/owner/repo`. |
-| `path` | `llms.txt` | Where to write llms.txt. In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against. |
+| `path` | `llms.txt` | Where to write llms.txt. In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against; in `check` mode, the file to lint (only when set). |
 | `full-path` | (empty) | Where to write llms-full.txt. Empty skips it. Not used in `check` and `comment` modes. |
 | `fresh` | `true` | Rebuild instead of using llms.ink's 24-hour cache. |
 | `mode` | `write` | `write`, `commit`, `pr`, `check` or `comment` (see [Modes](#modes)). |
@@ -240,6 +269,8 @@ An invalid or revoked key fails the job with `401 invalid_key`; the action never
 | `commit-message` | `Update llms.txt` | Commit message in `commit` and `pr` modes, and the pull request title. |
 | `branch` | (empty) | `commit`: the branch to commit to (default: the branch the workflow runs on, or the default branch). `pr`: the branch the pull request comes from (default: `llms-ink/llms-txt`). |
 | `token` | `github.token` | Token for `commit`, `pr` and `comment`. |
+| `check-target` | `auto` | `check` mode: `auto` lints the file at `path` when `path` is set and the file exists, else checks the site at `url`; `file` always lints the file at `path` (default `llms.txt`; fails when it's missing); `live` always checks the site. |
+| `links` | `true` | `check` mode on a file: also check up to 25 linked URLs and llms-full.txt next to `url`. The live check always does. |
 
 ## Outputs
 
@@ -267,8 +298,8 @@ Use `changed` to decide whether a later step should redeploy:
 ## Job summary
 
 Every run adds a summary to the workflow run page: tokens (and the previous count), sections, links, the commit or pull
-request it made, and a table of sections added, removed and changed. `check` mode lists the checker's result, every issue
-and every broken link.
+request it made, and a table of sections added, removed and changed. `check` mode lists the checker's result, the
+outline (sections and link counts), every issue and every broken link.
 
 ## Good to know
 

@@ -3,10 +3,11 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, posix, resolve } from 'node:path';
 import { gitHub } from './github.mjs';
-import { check, checkFailed, generate, LlmsInkError } from './llms.mjs';
+import { check, checkFailed, checkText, generate, LlmsInkError } from './llms.mjs';
 import { countSections, describeDiff, diffSections, diffTable } from './sections.mjs';
 
 export const MODES = ['write', 'commit', 'pr', 'check', 'comment'];
+export const CHECK_TARGETS = ['auto', 'file', 'live'];
 export const PR_BRANCH = 'llms-ink/llms-txt';
 const COMMENT_LIMIT = 60_000;
 
@@ -17,6 +18,8 @@ export function readInputs(env) {
   return {
     url: get('url'),
     path: get('path', 'llms.txt'),
+    /** Whether `path` was set explicitly: `check-target: auto` lints a workspace file only then. */
+    pathSet: get('path') !== '',
     fullPath: get('full-path'),
     fresh: bool('fresh', true),
     mode: get('mode', 'write').toLowerCase(),
@@ -25,6 +28,8 @@ export function readInputs(env) {
     commitMessage: get('commit-message', 'Update llms.txt'),
     branch: get('branch'),
     token: get('token'),
+    checkTarget: get('check-target', 'auto').toLowerCase(),
+    links: bool('links', true),
   };
 }
 
@@ -37,6 +42,8 @@ export function repoPath(p) {
 
 /** Annotation-safe text: GitHub workflow commands end at a newline. */
 const esc = (s) => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+/** A workflow-command property value (`title=`, `file=`): also escapes `:` and `,`. */
+const prop = (s) => esc(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
 const tokensOf = (text) => Math.ceil(text.length / 4);
 
 /** A fence longer than any backtick run in `text`. */
@@ -50,7 +57,8 @@ const fence = (text) => '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(
  */
 export async function run({ env, fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), stdout = (s) => process.stdout.write(s) }) {
   const log = (s) => stdout(`${s}\n`);
-  const annotate = (level, title, message) => log(`::${level} title=${esc(title).replace(/:/g, '%3A').replace(/,/g, '%2C')}::${esc(message)}`);
+  /** `props`: extra properties before `title`, each ending in a comma, e.g. `file=llms.txt,line=3,`. */
+  const annotate = (level, title, message, props = '') => log(`::${level} ${props}title=${prop(title)}::${esc(message)}`);
   const inputs = readInputs(env);
   const outputs = { changed: 'false', tokens: '', path: '', 'pr-url': '', source: '', pages: '' };
   const summary = [];
@@ -70,17 +78,32 @@ export async function run({ env, fetch, sleep = (ms) => new Promise((r) => setTi
     const deps = { fetch, sleep, apiKey: inputs.apiKey, api: env.LLMS_INK_API || undefined };
 
     if (inputs.mode === 'check') {
-      const result = await check(inputs.url, deps);
-      checkSummary(inputs.url, result, summary);
+      if (!CHECK_TARGETS.includes(inputs.checkTarget)) {
+        throw new Error(`\`check-target\` must be one of ${CHECK_TARGETS.join(', ')}; got \`${inputs.checkTarget}\`.`);
+      }
+      const fileExists = existsSync(at(inputs.path));
+      if (inputs.checkTarget === 'file' && !fileExists) throw new Error(`\`${inputs.path}\` doesn’t exist in the workspace. Check out the repository first.`);
+      const useFile = inputs.checkTarget === 'file' || (inputs.checkTarget === 'auto' && inputs.pathSet && fileExists);
+      const file = useFile ? inputs.path : null;
+      const result = file
+        ? await checkText(readFileSync(at(file), 'utf8'), { base: inputs.url, links: inputs.links }, deps)
+        : await check(inputs.url, deps);
+      const where = file ? `file=${prop(file)},` : '';
+      checkSummary(file ? `\`${file}\`` : inputs.url, result, summary, file);
       outputs.tokens = String(result.tokens);
       for (const i of result.issues) {
         const level = i.level === 'error' ? 'error' : i.level === 'warning' ? 'warning' : 'notice';
-        annotate(level, `llms.txt ${i.code}${i.line ? ` (line ${i.line})` : ''}`, i.message);
+        const line = file && i.line ? `line=${i.line},` : '';
+        annotate(level, `llms.txt ${i.code}${i.line ? ` (line ${i.line})` : ''}`, i.message, `${where}${line}`);
       }
-      for (const b of result.links.broken) annotate('error', 'llms.txt broken_link', `${b.url} (HTTP ${b.status || 'no answer'})`);
+      const lineOf = new Map((result.parsed?.sections ?? []).flatMap((s) => s.links.map((l) => [l.url, l.line])));
+      for (const b of result.links.broken) {
+        const line = file && lineOf.has(b.url) ? `line=${lineOf.get(b.url)},` : '';
+        annotate('error', 'llms.txt broken_link', `${b.url} (HTTP ${b.status || 'no answer'})`, `${where}${line}`);
+      }
       const failed = checkFailed(result);
       log(
-        `Checked ${result.url}: ${result.summary.errors} errors, ${result.summary.warnings} warnings, ` +
+        `Checked ${file ?? result.url}: ${result.summary.errors} errors, ${result.summary.warnings} warnings, ` +
           `${result.links.broken.length} of ${result.links.checked} links broken.`,
       );
       return finish(!failed);
@@ -288,20 +311,34 @@ function commentBody(inputs, gen, diff, before) {
   return [...head, '', '<details><summary>Generated llms.txt</summary>', '', `${f}markdown`, text.trimEnd(), f, '', '</details>'].join('\n');
 }
 
-function checkSummary(url, r, summary) {
+const cell = (s) => String(s).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ');
+
+/** `file`: the workspace file that was checked (POST), or null for the live site. */
+function checkSummary(label, r, summary, file = null) {
   summary.push(
-    `### llms.txt check for ${url}`,
+    `### llms.txt check for ${label}`,
     '',
     '| | |',
     '|---|---|',
-    `| File | ${r.found ? r.url : `Not found (HTTP ${r.status}) at ${r.url}`} |`,
+    `| File | ${file ? `\`${file}\` (links resolved against ${r.url ?? 'nothing'})` : r.found ? r.url : `Not found (HTTP ${r.status}) at ${r.url}`} |`,
     `| Result | ${checkFailed(r) ? 'Failed' : 'Passed'}: ${r.summary.errors} errors, ${r.summary.warnings} warnings |`,
     `| Tokens | ${r.tokens} |`,
     `| Sections | ${r.sections} |`,
     `| Links | ${r.links.total} (${r.links.checked} checked, ${r.links.broken.length} broken) |`,
-    `| llms-full.txt | ${r.llmsFull ? 'Published' : 'Not published'} |`,
+    `| llms-full.txt | ${r.llmsFull == null ? 'Not checked' : r.llmsFull ? 'Published' : 'Not published'} |`,
     '',
   );
+  const p = r.parsed;
+  if (p) {
+    summary.push(`**Outline:** ${p.title ? cell(p.title) : '(no title)'}${p.summary ? ` — ${cell(p.summary)}` : ''}`, '');
+    if (p.sections.length) {
+      summary.push('| Section | Links | Line |', '|---|---|---|');
+      for (const s of p.sections) {
+        summary.push(`| ${cell(s.name)}${s.optional ? ' (optional)' : ''} | ${s.links.length} | ${s.links[0]?.line ?? ''} |`);
+      }
+      summary.push('');
+    }
+  }
   if (r.issues.length) {
     summary.push('| Level | Check | Line | Message |', '|---|---|---|---|');
     for (const i of r.issues) summary.push(`| ${i.level} | \`${i.code}\` | ${i.line ?? ''} | ${i.message.replace(/\|/g, '\\|')} |`);

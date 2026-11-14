@@ -10,8 +10,8 @@ inputs:
     description: The site, docs section, page or GitHub repo to generate for (or to check), e.g. https://example.com or https://github.com/owner/repo.
     required: true
   path:
-    description: Where to write llms.txt. In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against.
-    default: llms.txt
+    description: Where to write llms.txt (default `llms.txt`). In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against; in `check` mode, the file to lint, only when set explicitly (see `check-target`).
+    default: ''
   full-path:
     description: Where to write llms-full.txt (the index followed by the Markdown of up to 20 linked pages). Leave empty to skip it. Not used in `check` and `comment` modes.
     default: ''
@@ -19,7 +19,7 @@ inputs:
     description: Rebuild instead of using llms.ink's cache (results are cached for 24 hours). Each rebuild counts against the daily quota (60 per IP address without a key).
     default: 'true'
   mode:
-    description: '`write` the file (default); `commit` it to the branch when it changed; open or update a `pr`; `check` the llms.txt the site publishes and fail on errors or broken links; or `comment` the section diff on a pull request.'
+    description: '`write` the file (default); `commit` it to the branch when it changed; open or update a `pr`; `check` llms.txt (the file at `path` in the checkout, or the one the site publishes) and fail on errors or broken links; or `comment` the section diff on a pull request.'
     default: write
   api-key:
     description: 'Optional llms.ink API key (`lk_…`), sent as `Authorization: Bearer`. Gives the job its own daily quota instead of the runner''s shared IP quota. Use a secret, e.g. secrets.LLMS_INK_KEY.'
@@ -36,6 +36,12 @@ inputs:
   token:
     description: GitHub token for `commit`, `pr` and `comment` modes. Commits pushed with the default token don't start other workflows; pass a personal access token or GitHub App token for that.
     default: ${{ github.token }}
+  check-target:
+    description: '`check` mode: `auto` lints the file at `path` when `path` is set and the file exists in the workspace, and otherwise checks the llms.txt the site at `url` publishes; `file` always lints the file at `path` (default `llms.txt`; fails when it''s missing); `live` always checks the site.'
+    default: auto
+  links:
+    description: '`check` mode on a file: also check up to 25 linked URLs and llms-full.txt next to `url`. The live check always checks links.'
+    default: 'true'
 
 outputs:
   changed:
@@ -73,6 +79,8 @@ runs:
         INPUT_COMMIT_MESSAGE: ${{ inputs.commit-message }}
         INPUT_BRANCH: ${{ inputs.branch }}
         INPUT_TOKEN: ${{ inputs.token }}
+        INPUT_CHECK_TARGET: ${{ inputs.check-target }}
+        INPUT_LINKS: ${{ inputs.links }}
       run: |
         command -v node >/dev/null || { echo '::error title=llms.ink::Node.js 20 or later is required on the runner.'; exit 1; }
         node "$GITHUB_ACTION_PATH/src/main.mjs"

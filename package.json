@@ -1,5 +1,6 @@
 {
   "name": "llms-txt-action",
+  "version": "1.2.0",
   "private": true,
   "description": "GitHub Action: generate, commit, PR, check or comment on llms.txt with llms.ink. No dependencies.",
   "type": "module",

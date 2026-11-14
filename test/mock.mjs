@@ -44,7 +44,25 @@ export function mockApi(repo = {}) {
       issues: [],
       summary: { errors: 0, warnings: 0 },
       checkedAt: '2026-11-14T00:00:00Z',
+      parsed: {
+        title: 'Acme',
+        summary: 'Acme makes things.',
+        details: null,
+        sections: [
+          {
+            name: 'Docs',
+            optional: false,
+            text: null,
+            links: [
+              { title: 'Start', url: 'https://acme.test/start', notes: 'Getting started', line: 7 },
+              { title: 'API', url: 'https://acme.test/api', notes: 'The API', line: 8 },
+            ],
+          },
+        ],
+      },
     },
+    /** When set, answers POST /check: (body, query) => Response. */
+    checkPost: null,
     /** Responses to serve before the normal one for /llms, e.g. [{ status: 503 }]. */
     llmsFailures: [],
     /** When set, POST /pulls answers 403 with this message. */
@@ -87,6 +105,10 @@ export function mockApi(repo = {}) {
         if (fail) return problem(fail.status, fail.code ?? 'error', fail.detail ?? `HTTP ${fail.status}`);
         const r = q.mode === 'full' ? state.full : state.llms;
         return json(200, { url: q.url, kind: 'site', mode: q.mode, title: 'Acme', tokens: Math.ceil(r.text.length / 4), model: null, cached: q.fresh !== '1', generatedAt: '2026-11-14T00:00:00Z', ...r });
+      }
+      if (p.endsWith('/check') && method === 'POST') {
+        if (state.checkPost) return state.checkPost(body, q);
+        return json(200, { ...state.check, site: q.base ?? null, url: q.base ? new URL('/llms.txt', q.base).href : null, llmsFull: q.links === '1' && q.base ? false : null });
       }
       if (p.endsWith('/check')) return json(200, state.check);
       return problem(404, 'not_found', 'No such endpoint');
@@ -180,7 +202,7 @@ export function mockApi(repo = {}) {
 
   const fetch = async (url, init = {}) => {
     const headers = Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
-    return handle(init.method ?? 'GET', String(url), init.body ? JSON.parse(init.body) : undefined, headers);
+    return handle(init.method ?? 'GET', String(url), init.body && !/^text\//.test(headers['content-type'] ?? '') ? JSON.parse(init.body) : init.body, headers);
   };
 
   return { fetch, calls, state, filesAt, writes: () => calls.filter((c) => c.method !== 'GET') };
