@@ -449,3 +449,37 @@ serves llms.ink and the GitHub API from memory.
 ## License
 
 MIT
+
+## Hosted inspection (experimental, v1.4.0)
+
+`mode: inspect` sends **only explicitly selected files** to the llms.ink Inspect API. It needs an inspection-enabled key and is an explicit choice to process that content on llms.ink infrastructure. The local MCP guard remains available for on-device scanning.
+
+```yaml
+name: Inspect agent context
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukax/llms-txt-action@v1.4.0
+        id: inspection
+        with:
+          mode: inspect
+          inspect-paths: |
+            .context/project.md
+            tools.json
+          api-key: ${{ secrets.LLMS_INK_INSPECT_KEY }}
+```
+
+Replace those paths with 1–20 `.md`, `.txt` or `.json` files you intend to submit. No globs, symlinks or paths outside the checkout; all files are validated before sending. Each encoded JSON request is capped at 128 KiB and the run at 1 MiB. The API inspects up to 8,192 model tokens per request. JSON files are parsed and serialized before inspection, so receipts contain both source and inspected-content digests.
+
+The job fails on flagged content, incomplete inspection, missing credentials, exhausted quota, network failure or an invalid receipt. `no_finding` requires complete coverage and a matching digest; it is not a safety guarantee. Raw content and service error bodies are not written to annotations or summaries.
+
+Outputs: `inspection-clean`, `inspection-flagged`, `inspection-unknown`, and `inspection-report` (a JSON file in the runner's temporary directory). Receipts contain filenames, digests and inspection results, not source text. Upload as an artifact only if you want GitHub to retain that metadata. No exemptions, automatic fixes, PR comments or billing are included in this pilot.
+
+For same-repository PRs, use `pull_request` and keep `contents: read`; fork PRs generally lack the secret and fail inspection. This mode refuses `pull_request_target`. Never run untrusted repository code with an inspection secret. The inspection destination is fixed to `https://llms.ink/api/v0/inspect`; `LLMS_INK_API` does not override it. Capacity errors with a bounded `Retry-After` can retry twice; no response is silently treated as clean.
+
+[Request pilot access, API limits and data handling](https://llms.ink/inspect/). Independent llms.ink integration using Pinata's model, not Pinata's Doorman desktop app.

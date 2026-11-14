@@ -1,0 +1,31 @@
+name: Inspect pilot smoke
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        id: benign
+        with:
+          mode: inspect
+          inspect-paths: test/fixtures/inspect-benign.md
+          api-key: ${{ secrets.INSPECT_PILOT_KEY }}
+      - uses: ./
+        id: attack
+        continue-on-error: true
+        with:
+          mode: inspect
+          inspect-paths: test/fixtures/inspect-attack.txt
+          api-key: ${{ secrets.INSPECT_PILOT_KEY }}
+      - name: Verify enforcement outcomes
+        env:
+          CLEAN: ${{ steps.benign.outputs.inspection-clean }}
+          FLAGGED: ${{ steps.attack.outputs.inspection-flagged }}
+          ATTACK_OUTCOME: ${{ steps.attack.outcome }}
+        run: |
+          test "$CLEAN" = 1
+          test "$FLAGGED" = 1
+          test "$ATTACK_OUTCOME" = failure

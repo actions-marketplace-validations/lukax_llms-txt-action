@@ -6,8 +6,11 @@ branding:
   color: blue
 
 inputs:
+  inspect-paths:
+    description: 'Opt-in hosted inspection: 1–20 explicit .md, .txt or .json file paths, one per line. No globs or symlinks. File content is sent to llms.ink; requires an inspection-enabled api-key.'
+    default: ''
   url:
-    description: The site, docs section, page or GitHub repo to generate for (or to check or report on), e.g. https://example.com or https://github.com/owner/repo. Required in every mode but `context`.
+    description: The site, docs section, page or GitHub repo to generate for (or to check or report on), e.g. https://example.com or https://github.com/owner/repo. Required in every mode but `context` and `inspect`.
     required: false
   path:
     description: Where to write llms.txt (default `llms.txt`). In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against; in `check` mode, the file to lint, only when set explicitly (see `check-target`).
@@ -19,7 +22,7 @@ inputs:
     description: Rebuild instead of using llms.ink's cache (results are cached for 24 hours). Each rebuild counts against the daily quota (60 per IP address without a key).
     default: 'true'
   mode:
-    description: '`write` the file (default); `commit` it to the branch when it changed; open or update a `pr`; `check` llms.txt (the file at `path` in the checkout, or the one the site publishes) and fail on errors or broken links; `comment` the section diff on a pull request; `aeo` reports what AI agents see at `url` (annotations, job summary, a pull request comment) and fails per `aeo-fail-on`; `context` refreshes version-pinned dependency docs in `context-dir` and opens a pull request; `indexnow` only submits changed URLs to IndexNow.'
+    description: '`inspect` explicitly named files via the hosted pilot (fails on findings or incomplete inspection); `write` the file (default); `commit` it to the branch when it changed; open or update a `pr`; `check` llms.txt (the file at `path` in the checkout, or the one the site publishes) and fail on errors or broken links; `comment` the section diff on a pull request; `aeo` reports what AI agents see at `url` (annotations, job summary, a pull request comment) and fails per `aeo-fail-on`; `context` refreshes version-pinned dependency docs in `context-dir` and opens a pull request; `indexnow` only submits changed URLs to IndexNow.'
     default: write
   api-key:
     description: 'Optional llms.ink API key (`lk_…`), sent as `Authorization: Bearer`. Gives the job its own daily quota instead of the runner''s shared IP quota. Use a secret, e.g. secrets.LLMS_INK_KEY.'
@@ -74,6 +77,18 @@ inputs:
     default: AGENTS.md
 
 outputs:
+  inspection-report:
+    description: 'Path to JSON receipts in the runner temp directory; no source text.'
+    value: ${{ steps.llms.outputs.inspection-report }}
+  inspection-flagged:
+    description: 'Files flagged by hosted inspection.'
+    value: ${{ steps.llms.outputs.inspection-flagged }}
+  inspection-unknown:
+    description: 'Files without a complete inspection decision.'
+    value: ${{ steps.llms.outputs.inspection-unknown }}
+  inspection-clean:
+    description: 'Files completely inspected without findings; not a safety guarantee.'
+    value: ${{ steps.llms.outputs.inspection-clean }}
   changed:
     description: '`true` when the generated file differs from the previous one: the file on disk (`write`, `comment`) or on the branch (`commit`, `pr`); in `context` mode and with `autofix`, when the pull request has changes. Always `false` in `check` mode.'
     value: ${{ steps.llms.outputs.changed }}
@@ -108,6 +123,7 @@ runs:
     - id: llms
       shell: bash
       env:
+        INPUT_INSPECT_PATHS: ${{ inputs.inspect-paths }}
         INPUT_URL: ${{ inputs.url }}
         INPUT_PATH: ${{ inputs.path }}
         INPUT_FULL_PATH: ${{ inputs.full-path }}

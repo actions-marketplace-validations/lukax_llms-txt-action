@@ -9,3 +9,5 @@ Supports write, commit, pr, check and comment modes for llms.txt; `aeo` mode (ll
 - [README](https://raw.githubusercontent.com/lukax/llms-txt-action/main/README.md)
 
 <!-- Generated with https://llms.ink -->
+
+- [Hosted inspection](https://llms.ink/inspect/): opt-in mode inspect in v1.4.0; explicit files, enabled API key, content-bound receipts.
