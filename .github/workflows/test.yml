@@ -25,6 +25,7 @@ jobs:
           url: https://github.com/${{ github.repository }}
           path: out/llms.txt
           full-path: out/llms-full.txt
+          generated: true
       - name: Check the files
         env:
           SOURCE: ${{ steps.llms.outputs.source }}
