@@ -7,28 +7,55 @@ branding:
 
 inputs:
   url:
-    description: The site, docs section, page or GitHub repo to generate for, e.g. https://example.com or https://github.com/owner/repo.
+    description: The site, docs section, page or GitHub repo to generate for (or to check), e.g. https://example.com or https://github.com/owner/repo.
     required: true
   path:
-    description: Where to write llms.txt.
+    description: Where to write llms.txt. In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against.
     default: llms.txt
   full-path:
-    description: Where to write llms-full.txt (the index followed by the Markdown of up to 20 linked pages). Leave empty to skip it.
+    description: Where to write llms-full.txt (the index followed by the Markdown of up to 20 linked pages). Leave empty to skip it. Not used in `check` and `comment` modes.
     default: ''
   fresh:
-    description: Rebuild instead of using llms.ink's cache (results are cached for 24 hours). Each rebuild counts against the free daily quota of 60 per IP address.
+    description: Rebuild instead of using llms.ink's cache (results are cached for 24 hours). Each rebuild counts against the daily quota (60 per IP address without a key).
     default: 'true'
+  mode:
+    description: '`write` the file (default); `commit` it to the branch when it changed; open or update a `pr`; `check` the llms.txt the site publishes and fail on errors or broken links; or `comment` the section diff on a pull request.'
+    default: write
+  api-key:
+    description: 'Optional llms.ink API key (`lk_…`), sent as `Authorization: Bearer`. Gives the job its own daily quota instead of the runner''s shared IP quota. Use a secret, e.g. secrets.LLMS_INK_KEY.'
+    default: ''
+  generated:
+    description: 'Always generate, never copy the site''s own llms.txt (sends `native=0`). Set it to `true` when your /llms.txt is served from llms.ink.'
+    default: 'false'
+  commit-message:
+    description: Commit message in `commit` and `pr` modes; also the pull request title.
+    default: Update llms.txt
+  branch:
+    description: '`commit` mode: the branch to commit to (default: the branch the workflow runs on). `pr` mode: the branch the pull request is opened from (default: llms-ink/llms-txt).'
+    default: ''
+  token:
+    description: GitHub token for `commit`, `pr` and `comment` modes. Commits pushed with the default token don't start other workflows; pass a personal access token or GitHub App token for that.
+    default: ${{ github.token }}
 
 outputs:
+  changed:
+    description: '`true` when the generated file differs from the previous one: the file on disk (`write`, `comment`) or on the branch (`commit`, `pr`). Always `false` in `check` mode.'
+    value: ${{ steps.llms.outputs.changed }}
+  tokens:
+    description: Estimated tokens in llms.txt (in `check` mode, in the published file).
+    value: ${{ steps.llms.outputs.tokens }}
+  path:
+    description: Where llms.txt was written; empty in `check` and `comment` modes.
+    value: ${{ steps.llms.outputs.path }}
+  pr-url:
+    description: The pull request opened or updated in `pr` mode (or the open one, when nothing changed).
+    value: ${{ steps.llms.outputs.pr-url }}
   source:
     description: '`generated` when llms.ink wrote the file; `native` when the site publishes its own llms.txt, which is copied as is.'
     value: ${{ steps.llms.outputs.source }}
   pages:
-    description: How many links (llms.txt) or pages (llms-full.txt) the file covers.
+    description: How many links llms.txt covers.
     value: ${{ steps.llms.outputs.pages }}
-  tokens:
-    description: Estimated tokens in llms.txt.
-    value: ${{ steps.llms.outputs.tokens }}
 
 runs:
   using: composite
@@ -36,31 +63,16 @@ runs:
     - id: llms
       shell: bash
       env:
-        URL: ${{ inputs.url }}
-        OUT: ${{ inputs.path }}
-        FULL_OUT: ${{ inputs.full-path }}
-        FRESH: ${{ inputs.fresh == 'true' && '1' || '0' }}
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_FULL_PATH: ${{ inputs.full-path }}
+        INPUT_FRESH: ${{ inputs.fresh }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_GENERATED: ${{ inputs.generated }}
+        INPUT_COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        INPUT_BRANCH: ${{ inputs.branch }}
+        INPUT_TOKEN: ${{ inputs.token }}
       run: |
-        set -euo pipefail
-        command -v jq >/dev/null || { echo '::error title=llms.ink::jq is required on the runner.'; exit 1; }
-        # GET /api/v0/llms (https://llms.ink/docs/): errors are problem details with a readable `detail`.
-        fetch() {
-          local mode=$1 out=$2 reply code body
-          reply=$(curl -sS --retry 2 --retry-connrefused --max-time 300 -G https://llms.ink/api/v0/llms \
-            --data-urlencode "url=$URL" -d "mode=$mode" -d "fresh=$FRESH" \
-            -H 'User-Agent: llms-txt-action (+https://github.com/lukax/llms-txt-action)' -w $'\n%{http_code}')
-          code=${reply##*$'\n'}
-          body=${reply%$'\n'*}
-          if [ "$code" != 200 ]; then
-            echo "::error title=llms.ink ($code)::$(jq -r '.detail // .title' <<<"$body" 2>/dev/null || echo "HTTP $code from llms.ink")"
-            exit 1
-          fi
-          mkdir -p "$(dirname "$out")"
-          jq -j .text <<<"$body" > "$out"
-          echo "Wrote $out ($(jq -r .source <<<"$body"), $(jq -r .pages <<<"$body") $( [ "$mode" = full ] && echo pages || echo links ), ~$(jq -r .tokens <<<"$body") tokens)"
-          if [ "$mode" = llms ]; then
-            { echo "source=$(jq -r .source <<<"$body")"; echo "pages=$(jq -r .pages <<<"$body")"; echo "tokens=$(jq -r .tokens <<<"$body")"; } >> "$GITHUB_OUTPUT"
-          fi
-        }
-        fetch llms "$OUT"
-        if [ -n "$FULL_OUT" ]; then fetch full "$FULL_OUT"; fi
+        command -v node >/dev/null || { echo '::error title=llms.ink::Node.js 20 or later is required on the runner.'; exit 1; }
+        node "$GITHUB_ACTION_PATH/src/main.mjs"

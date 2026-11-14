@@ -6,6 +6,15 @@ on:
   workflow_dispatch:
 
 jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+
   repo:
     runs-on: ubuntu-latest
     steps:
@@ -20,10 +29,25 @@ jobs:
         env:
           SOURCE: ${{ steps.llms.outputs.source }}
           PAGES: ${{ steps.llms.outputs.pages }}
+          CHANGED: ${{ steps.llms.outputs.changed }}
+          OUT: ${{ steps.llms.outputs.path }}
         run: |
           set -x
           test "$SOURCE" = generated
           test "$PAGES" -gt 0
+          test "$CHANGED" = true
+          test "$OUT" = out/llms.txt
           head -n 1 out/llms.txt | grep -q '^# '
           tail -n 1 out/llms.txt | grep -qx '<!-- Generated with https://llms.ink -->'
           grep -q '^---$' out/llms-full.txt
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: llms
+        uses: ./
+        with:
+          url: https://llmstxt.org
+          mode: check
+      - run: test "${{ steps.llms.outputs.tokens }}" -gt 0

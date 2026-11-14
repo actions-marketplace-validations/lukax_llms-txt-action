@@ -1,4 +1,4 @@
-# This repo's own llms.txt, kept current by the action itself (the README's second example).
+# This repo's own llms.txt, kept current by the action itself (the README's "commit" example).
 name: llms.txt
 on:
   schedule:
@@ -16,8 +16,4 @@ jobs:
       - uses: ./
         with:
           url: https://github.com/${{ github.repository }}
-      - run: |
-          git add llms.txt
-          git diff --cached --quiet && exit 0
-          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -m 'Update llms.txt'
-          git push
+          mode: commit

@@ -1,0 +1,12 @@
+{
+  "name": "llms-txt-action",
+  "private": true,
+  "description": "GitHub Action: generate, commit, PR, check or comment on llms.txt with llms.ink. No dependencies.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test test/sections.test.mjs test/action.test.mjs",
+    "harness": "node test/harness.mjs"
+  },
+  "license": "MIT"
+}
