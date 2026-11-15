@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.2 — 2026-11-15
+
+- Pin context generation to CLI 0.7.2, which validates output destinations and locked versions before writing.
+- Refuse symlinks, hard links, special files, missing packs and invalid UTF-8 before proposing context changes on GitHub. Bound snapshots to 256 files, 8 MiB per file, 32 MiB total and 32 directory levels.
+- Pass `--agents-md none` explicitly when AGENTS updates are disabled.
+- Add a regression proving a linked extra file cannot enter a proposed commit. Inspection behavior and receipt contracts are unchanged.
+
 ## 1.4.1
 
 - Use the shared SDK receipt validator and conformance corpus.

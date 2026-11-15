@@ -1,6 +1,6 @@
 // The AEO-era modes: aeo (+ autofix), indexnow and context, against the in-memory llms.ink, GitHub, site and IndexNow.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -322,7 +322,7 @@ test('context: runs the CLI with the contract flags, opens a PR with new and cha
   }
   const r = await t.go();
   assert.equal(r.ok, true, r.stdout);
-  assert.deepEqual(cli.calls[0].args, ['-y', '@lukax/llms-ink', 'context', '--manifest', 'package.json', '--manifest', 'services/api/pyproject.toml', '--out', '.context', '--max', '5', '--agents-md', 'AGENTS.md']);
+  assert.deepEqual(cli.calls[0].args, ['-y', '@lukax/llms-ink@0.7.2', 'context', '--manifest', 'package.json', '--manifest', 'services/api/pyproject.toml', '--out', '.context', '--max', '5', '--agents-md', 'AGENTS.md']);
   assert.equal(cli.calls[0].cmd, 'npx');
   assert.equal(cli.calls[0].cwd, t.ws);
   assert.equal(cli.calls[0].key, 'lk_ctx', 'the API key reaches the CLI as LLMS_INK_KEY');
@@ -364,5 +364,23 @@ test('context: no PR when nothing changed; agents-md none skips it; CLI failure 
 test('context.mjs: blobSha matches git, contextArgs without agents-md', () => {
   // `printf 'hello\n' | git hash-object --stdin`
   assert.equal(blobSha('hello\n'), 'ce013625030ba8dba906f756967f9e9ca394464a');
-  assert.deepEqual(contextArgs({ manifests: [], dir: 'docs/ctx', max: 3, agentsMd: '' }), ['-y', '@lukax/llms-ink', 'context', '--out', 'docs/ctx', '--max', '3']);
+  assert.deepEqual(contextArgs({ manifests: [], dir: 'docs/ctx', max: 3, agentsMd: '' }), ['-y', '@lukax/llms-ink@0.7.2', 'context', '--out', 'docs/ctx', '--max', '3', '--agents-md', 'none']);
+});
+
+test('context refuses a linked extra file before any GitHub write', async () => {
+  let t;
+  const exec = async (_cmd, _args, { cwd }) => {
+    mkdirSync(join(cwd, '.context'));
+    writeFileSync(join(cwd, '.context/README.md'), '# Dependency docs\n');
+    writeFileSync(join(cwd, 'AGENTS.md'), '# Agents\n');
+    writeFileSync(join(cwd, 'private-fixture.txt'), 'PRIVATE FIXTURE MUST NOT ENTER A COMMIT');
+    symlinkSync(join(cwd, 'private-fixture.txt'), join(cwd, '.context/extra.txt'));
+    return 0;
+  };
+  try {
+    t = setup({ mode: 'context' }, { exec });
+    const result = await t.go();
+    assert.equal(result.ok, false); assert.equal(ghWrites(t.mock).length, 0);
+    assert.ok(!result.stdout.includes('PRIVATE FIXTURE')); assert.ok(!result.summary.includes('PRIVATE FIXTURE'));
+  } finally { if (t) rmSync(join(t.ws, '..'), { recursive: true, force: true }); }
 });

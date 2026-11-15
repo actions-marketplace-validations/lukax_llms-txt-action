@@ -8,12 +8,36 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
       - run: npm test
+
+  context-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test test/context-paths.test.mjs
+
+  context-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --prefix "$RUNNER_TEMP/context-cli" --ignore-scripts --no-audit --no-fund @lukax/llms-ink@0.7.2
+      - run: node --test test/context-installed.test.mjs
+        env:
+          LLMS_INK_CONTEXT_CLI: ${{ runner.temp }}/context-cli/node_modules/@lukax/llms-ink
 
   repo:
     runs-on: ubuntu-latest

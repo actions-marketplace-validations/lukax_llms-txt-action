@@ -450,6 +450,10 @@ serves llms.ink and the GitHub API from memory.
 
 MIT
 
+Context mode uses the pinned CLI 0.7.2. Generated outputs and the AGENTS file must be regular files without symlinks or hard links. The Action checks all files in the selected context directory, including extra files, before making GitHub changes. A missing pack or invalid UTF-8 fails the job. Snapshots are bounded to 256 files, 8 MiB per file, 32 MiB total, 256 directories and 32 nested directory levels. `agents-md: none` explicitly disables CLI AGENTS updates.
+
+The CLI validates destinations before fetching and checks for edits afterward. Each file is replaced individually; interruption can leave a partially refreshed local pack. Keep the workspace stable during a run: these checks do not isolate it from a process replacing parent directories concurrently. They do not inspect or certify document content.
+
 ## Hosted inspection (experimental, v1.4.1)
 
 `mode: inspect` sends **only explicitly selected files** to the llms.ink Inspect API. It needs an inspection-enabled key and is an explicit choice to process that content on llms.ink infrastructure. The local MCP guard remains available for on-device scanning.
@@ -464,7 +468,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: lukax/llms-txt-action@v1.4.1
+      - uses: lukax/llms-txt-action@v1.4.2
         id: inspection
         with:
           mode: inspect
