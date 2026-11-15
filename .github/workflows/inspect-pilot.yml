@@ -29,3 +29,55 @@ jobs:
           test "$CLEAN" = 1
           test "$FLAGGED" = 1
           test "$ATTACK_OUTCOME" = failure
+
+  context-pack:
+    needs: inspect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Prepare synthetic packs
+        run: |
+          mkdir .context-benign .context-mixed
+          cp test/fixtures/inspect-benign.md .context-benign/a.md
+          cp test/fixtures/inspect-benign.md .context-mixed/a.md
+          cp test/fixtures/inspect-attack.txt .context-mixed/b.txt
+      - uses: ./
+        id: benign
+        with:
+          mode: inspect-context
+          inspect-dir: .context-benign
+          api-key: ${{ secrets.INSPECT_PILOT_KEY }}
+      - uses: ./
+        id: mixed
+        continue-on-error: true
+        with:
+          mode: inspect-context
+          inspect-dir: .context-mixed
+          api-key: ${{ secrets.INSPECT_PILOT_KEY }}
+      - name: Verify pack outcomes and manifest format
+        env:
+          BENIGN_OUTCOME: ${{ steps.benign.outcome }}
+          BENIGN_REPORT: ${{ steps.benign.outputs.inspection-report }}
+          BENIGN_RECOMMENDATION: ${{ steps.benign.outputs.inspection-recommendation }}
+          MIXED_OUTCOME: ${{ steps.mixed.outcome }}
+          MIXED_REPORT: ${{ steps.mixed.outputs.inspection-report }}
+          MIXED_RECOMMENDATION: ${{ steps.mixed.outputs.inspection-recommendation }}
+          FLAGGED: ${{ steps.mixed.outputs.inspection-flagged }}
+          NOT_ATTEMPTED: ${{ steps.mixed.outputs.inspection-not-attempted }}
+        run: |
+          test "$BENIGN_OUTCOME" = success
+          test "$BENIGN_RECOMMENDATION" = continue
+          test "$MIXED_OUTCOME" = failure
+          test "$MIXED_RECOMMENDATION" = withhold
+          test "$FLAGGED" = 1
+          test "$NOT_ATTEMPTED" = 0
+          node --input-type=module <<'JS'
+          import {readFileSync} from 'node:fs';
+          import assert from 'node:assert/strict';
+          for(const [name,files] of [['BENIGN_REPORT',1],['MIXED_REPORT',2]]) {
+            const manifest=JSON.parse(readFileSync(process.env[name],'utf8'));
+            assert.equal(manifest.schema,'llms-ink-context-inspection-1');
+            assert.equal(manifest.files.length,files);
+            assert.equal(manifest.runState,'complete');
+          }
+          JS

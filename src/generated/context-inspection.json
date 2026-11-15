@@ -1,0 +1,11 @@
+{
+  "package": "@lukax/llms-ink",
+  "version": "0.8.0",
+  "sources": {
+    "src/context/files.js": "082db696f71daadc6bb210d395456a30c636e988eb0e5e97385a636f2cc3d328",
+    "src/context/inspection.js": "9f5ee63244827c685730fef25fbc643763d652e7f0dc08ec4040618d6b9eeefc",
+    "src/context/output.js": "c7c97e6a9dd5bf614d6522d63339aad5a57ff8b1ba6818ac5872a3e3412e7660",
+    "src/inspect-contract.js": "b3a8663b092516ba8743ee99506e98083be62c4a997306cc7283d6bbb893fcc8"
+  },
+  "bundleSha256": "39fcd8a720b9a963f0ee0dd288b4f3d2b2a6968b7a66abd397afec1fef886194"
+}

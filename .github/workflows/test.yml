@@ -25,7 +25,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: node --test test/context-paths.test.mjs
+      - run: node --test test/context-paths.test.mjs test/inspect-context.test.mjs
+
+  inspect-context-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm install --prefix "$RUNNER_TEMP/inspection-cli" --ignore-scripts --no-audit --no-fund @lukax/llms-ink@0.8.0
+      - run: node --test test/inspect-context.test.mjs
+        env:
+          LLMS_INK_INSPECTION_CLI: ${{ runner.temp }}/inspection-cli/node_modules/@lukax/llms-ink
 
   context-cli:
     runs-on: ubuntu-latest

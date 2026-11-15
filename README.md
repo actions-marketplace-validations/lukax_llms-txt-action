@@ -31,7 +31,9 @@ the free [llms.ink](https://llms.ink) API; an API key is optional.
 | `check` | Checks llms.txt (format at llmstxt.org, first 25 links): the one the site publishes, or the file at `path` in the checkout when you set `path` (see `check-target`). Writes nothing. | The file is missing, has format errors, or has broken links. Warnings don't fail. |
 | `comment` | On a pull request: generates llms.txt, compares it with `path` in the repository section by section, and posts one comment (updated on every run). Writes nothing. | llms.ink returns an error. Differences never fail it. |
 | `aeo` | Reads `url` the way AI agents do ([llms.ink report](https://llms.ink/report/): bot access, raw-HTML visibility, Markdown, agent files, hidden instructions). Annotations, a job summary, and on pull requests one comment updated on every run. With `autofix: true`, also opens or updates a pull request applying the report's robots.txt, `_headers` and llms.txt fixes. | Any check fails (`aeo-fail-on: fail`, default), also on warnings (`warn`), or never (`none`). |
-| `context` | Runs `npx -y @lukax/llms-ink context` in the checkout: version-pinned docs for the dependencies the repo imports, in `context-dir`, indexed in `agents-md`. Opens or updates a pull request from `llms-ink/context` when they changed. | The CLI or GitHub returns an error. |
+| `context` | Runs the pinned CLI 0.7.2 in the checkout: version-pinned docs for the dependencies the repo imports, in `context-dir`, indexed in `agents-md`. Opens or updates a pull request from `llms-ink/context` when they changed. | The CLI or GitHub returns an error. |
+| `inspect` | Explicitly uploads the named `inspect-paths`; writes receipt metadata and a job summary. | Findings, incomplete inspection, invalid inputs/receipts or service failure. |
+| `inspect-context` | Explicitly uploads the entire `inspect-dir`, creates a fresh CLI manifest and verifies the current pack. | Findings, incomplete/unattempted files, changed or invalid packs, interruption or service failure. |
 | `indexnow` | Only the IndexNow step (see `indexnow-key`), without generating anything. | The key file is missing or IndexNow rejects the submission. |
 
 `commit` and `pr` work through the GitHub API, so they don't need a local `git` identity, and each run makes at most one
@@ -48,10 +50,12 @@ commit.
 | `check` | none | |
 | `comment` | `pull-requests: write` | `actions/checkout`, to read the committed file. On pull requests from forks the token can't comment: the job warns and passes. |
 | `aeo` | none; `pull-requests: write` to comment; `contents: write` and `pull-requests: write` with `autofix` | |
-| `context` | `contents: write`, `pull-requests: write` | `actions/checkout` and your package manager's install (the CLI reads the lockfile); the pull request setting above |
+| `context` | `contents: write`, `pull-requests: write` | `actions/checkout` and manifests/lockfiles; the pull request setting above |
+| `inspect` | `contents: read` for checkout | An inspection-enabled key and explicit `inspect-paths`; no GitHub writes |
+| `inspect-context` | `contents: read` for checkout | An inspection-enabled key and explicit `inspect-dir`; no GitHub writes |
 | `indexnow` | `contents: read` | |
 
-`indexnow-key` works in any mode: after the mode's work succeeds, the action checks that `https://<site>/<key>.txt`
+`indexnow-key` works in non-inspection modes: after the mode's work succeeds, the action checks that `https://<site>/<key>.txt`
 holds the key, then submits `indexnow-urls`, or else the pages the deployed (`deployment_status`, `workflow_run`) or
 pushed commit changed, matched by path against the site's sitemap (`src/pages/docs/intro.mdx`,
 `content/docs/intro.md` → `/docs/intro/`; components, styles and config match nothing, so a shared change doesn't
@@ -361,11 +365,13 @@ An invalid or revoked key fails the job with `401 invalid_key`; the action never
 
 | Input | Default | |
 |---|---|---|
-| `url` | (required) | The site, docs section, page or GitHub repo, e.g. `https://example.com` or `https://github.com/owner/repo`. Not used in `context` mode. |
+| `url` | (required except context/inspection modes) | The site, docs section, page or GitHub repo, e.g. `https://example.com` or `https://github.com/owner/repo`. Not used in `context`, `inspect` or `inspect-context`. |
+| `inspect-dir` | (empty) | `inspect-context` only: explicit directory to upload; required, no default. |
+| `inspect-paths` | (empty) | `inspect` only: 1–20 explicit file paths, one per line. Do not combine with `inspect-dir`. |
 | `path` | `llms.txt` | Where to write llms.txt. In `commit` and `pr` modes, a path inside the repository; in `comment` mode, the file to compare against; in `check` mode, the file to lint (only when set). |
 | `full-path` | (empty) | Where to write llms-full.txt. Empty skips it. Not used in `check` and `comment` modes. |
 | `fresh` | `true` | Rebuild instead of using llms.ink's 24-hour cache. |
-| `mode` | `write` | `write`, `commit`, `pr`, `check`, `comment`, `aeo`, `context` or `indexnow` (see [Modes](#modes)). |
+| `mode` | `write` | `write`, `commit`, `pr`, `check`, `comment`, `aeo`, `context`, `indexnow`, `inspect` or `inspect-context` (see [Modes](#modes) and the inspection sections below). |
 | `api-key` | (empty) | llms.ink API key, sent as `Authorization: Bearer`. Use `${{ secrets.LLMS_INK_KEY }}`. |
 | `generated` | `false` | `true` always generates and never copies the site's own llms.txt. Set it when your /llms.txt is served from llms.ink. |
 | `commit-message` | `Update llms.txt` | Commit message in `commit`, `pr` and `context` modes and for `autofix`, and the pull request title (`Update dependency docs in .context` and `Fix agent access (llms.ink report)` when not set). |
@@ -376,7 +382,7 @@ An invalid or revoked key fails the job with `401 invalid_key`; the action never
 | `aeo-fail-on` | `fail` | `aeo` mode: `fail` fails the job on any failed check, `warn` also on warnings, `none` never. |
 | `autofix` | `false` | `aeo` mode: open or update a pull request applying the report's robots.txt, `_headers` and llms.txt fixes. |
 | `autofix-dir` | (empty) | `autofix`: folder for fixed files. Default: next to the existing file, else `public/` or `static/`, else the root. |
-| `indexnow-key` | (empty) | Any mode: after it succeeds, submit changed URLs to IndexNow. The key must be served at `https://<site>/<key>.txt`. |
+| `indexnow-key` | (empty) | After a non-inspection mode succeeds, submit changed URLs to IndexNow. Ignored by `inspect` and `inspect-context`. The key must be served at `https://<site>/<key>.txt`. |
 | `indexnow-urls` | (empty) | URLs or paths to submit, one per line or comma-separated. Default: the pages the deployed or pushed commit changed, matched against the sitemap. |
 | `indexnow-key-location` | (empty) | The key file's URL or path when it isn't `/<key>.txt` (same host). |
 | `context-dir` | `.context` | `context` mode: where the docs go (`--out`). |
@@ -489,3 +495,53 @@ For same-repository PRs, use `pull_request` and keep `contents: read`; fork PRs 
 [Request pilot access, API limits and data handling](https://llms.ink/inspect/). Independent llms.ink integration using Pinata's model, not Pinata's Doorman desktop app.
 
 Inspection receipt parsing uses the shared llms.ink conformance corpus and generated SDK validator. Unknown counters, unsupported revisions and incomplete results cannot pass the job.
+
+## Inspect a context pack (v1.5.0)
+
+Use `inspect-context` to explicitly upload an entire directory and produce a fresh CLI-compatible manifest. It uses the bundled CLI 0.8.0 inspector: no runtime package download or checkout executable. The existing `context` mode still only generates dependency docs.
+
+```yaml
+name: Inspect context pack
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: lukax/llms-txt-action@v1.5.0
+        id: inspection
+        with:
+          mode: inspect-context
+          inspect-dir: .context
+          api-key: ${{ secrets.LLMS_INK_INSPECT_KEY }}
+```
+
+`inspect-dir` is required and has no default. Every UTF-8 `.md`, `.txt` and `.json` file under that directory is included, including nested files and local notes. JSON is inspected as exact text, including whitespace/BOM. Other file types, symlinks, hard links, invalid inputs or unusable report storage fail before uploads. AGENTS.md outside the selected directory is not included. For a local preview without uploads, run `llms-ink context inspect --dir .context --dry-run` first.
+
+Limits: 64 files, 128 KiB per encoded request, 8 MiB total; the service also limits each file to 8,192 tokens. Requests wait seven seconds between files. This mode makes no automatic retries. Rate limits, service failures and cancellation stop new submissions; flagged and token-limit results remain explicit. Use a stable workspace: these checks do not isolate the job from another process under the same OS account or lock files through later consumption.
+
+The step fails on findings, incomplete results, changed packs or interruption. It verifies the current file set after scanning and retains the fresh report even if a newly added invalid file prevents verification. A temporary private workspace directory is removed after normal completion or graceful interruption. Forced process termination can leave temporary files; normal runner cleanup still applies. No comments, commits, PRs, IndexNow submissions or automatic artifact uploads occur.
+
+| Output | Meaning |
+| --- | --- |
+| `inspection-report` | Fresh CLI manifest in a private directory under `RUNNER_TEMP`. No source text; filenames and declared source URLs may be sensitive. |
+| `inspection-status` | `current`, `stale` or `invalid` local file-set verification. `current` alone does not mean the scan passed. |
+| `inspection-recommendation` | `continue` only after successful scan and verification without interruption; otherwise `withhold`. Also require step success. |
+| `inspection-clean` | Files completely inspected without findings. These counts describe the scanned snapshot, even if the pack later changes. |
+| `inspection-flagged` | Files flagged by the service. |
+| `inspection-unknown` | Attempted files without a complete result. |
+| `inspection-not-attempted` | Files not submitted after the scan stopped; separate from unknown results. |
+
+The manifest is **unsigned** and can be forged by someone who can edit it. The Action creates a new report rather than accepting one from the checkout. Keep the report trusted; a no-finding receipt does not establish safety or grant tool authority. Source metadata is declared, not verified provenance. Report files use mode 0600 and their directories 0700 on POSIX; Windows privacy depends on directory ACLs. Upload the report as an artifact only when you want GitHub to retain that metadata.
+
+After downloading a trusted report into your working directory, CLI 0.8.0+ can check it offline:
+
+```sh
+llms-ink context verify --dir .context --receipt downloaded-manifest.json
+```
+
+This checks exact local bytes and supported receipt revisions, not upstream freshness. Use a trusted Action version and workflow; never run untrusted repository code with the inspection secret. This mode rejects `pull_request_target`. Fork PRs without the secret fail rather than bypassing inspection. The known detector gap remains documented in the [Inspect evaluation](https://llms.ink/inspect/evaluation/).
+
+Maintainers: the generated module and source-hash manifest live under `src/generated/`. Regenerate from the llms.ink source checkout with `node scripts/sync-context-inspection.mjs --action /path/to/llms-txt-action`; add `--check` to verify drift. CI compares those source hashes and resulting manifests with the published CLI 0.8.0. Existing generation-mode package tests still use its separate CLI 0.7.2 pin.

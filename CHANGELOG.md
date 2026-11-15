@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0 — 2026-11-15
+
+- Add explicit `mode: inspect-context` with required `inspect-dir`. Bundle the CLI 0.8.0 pack inspector; no package installation or checkout executable is used during inspection.
+- Save fresh, unsigned CLI manifests and expose local freshness, continue/withhold and unattempted counts. Fail on findings, incomplete results, stale packs or interruption; preserve partial reports where publication succeeds.
+- Validate the complete selected pack before uploads, use the fixed API origin, pace requests without retries and clean temporary workspace files. No commits, PRs, comments or IndexNow calls in this mode.
+- Check the bundled source hashes against the public CLI and test CLI verification of Action-generated manifests. Existing `context` generation remains pinned to CLI 0.7.2; existing named-file inspection behavior is unchanged.
+
 ## 1.4.2 — 2026-11-15
 
 - Pin context generation to CLI 0.7.2, which validates output destinations and locked versions before writing.

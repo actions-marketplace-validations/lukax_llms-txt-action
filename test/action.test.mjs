@@ -48,7 +48,7 @@ test('action.yml: every input reaches the step as INPUT_*, with the same default
   const block = yml.slice(yml.indexOf('\ninputs:'), yml.indexOf('\noutputs:'));
   const names = [...block.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1]);
   assert.deepEqual(names, [
-    'inspect-paths', 'url', 'path', 'full-path', 'fresh', 'mode', 'api-key', 'generated', 'commit-message', 'branch', 'token', 'check-target', 'links',
+    'inspect-dir', 'inspect-paths', 'url', 'path', 'full-path', 'fresh', 'mode', 'api-key', 'generated', 'commit-message', 'branch', 'token', 'check-target', 'links',
     'aeo-fail-on', 'autofix', 'autofix-dir', 'indexnow-key', 'indexnow-urls', 'indexnow-key-location', 'context-dir', 'context-max', 'manifests', 'agents-md',
   ]);
   const env = {};

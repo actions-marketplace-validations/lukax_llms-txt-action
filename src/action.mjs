@@ -1,4 +1,5 @@
 import { inspectMode } from './inspect.mjs';
+import { inspectContextMode } from './inspect-context.mjs';
 // The action: read inputs, run the mode, write outputs and the job summary.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -10,7 +11,7 @@ import { changedUrls, checkKey, INDEXNOW_API, IndexNowError, parseUrls, sitemapU
 import { check, checkFailed, checkText, generate, LlmsInkError, report } from './llms.mjs';
 import { countSections, describeDiff, diffSections, diffTable } from './sections.mjs';
 
-export const MODES = ['write', 'commit', 'pr', 'check', 'comment', 'aeo', 'context', 'indexnow', 'inspect'];
+export const MODES = ['write', 'commit', 'pr', 'check', 'comment', 'aeo', 'context', 'indexnow', 'inspect', 'inspect-context'];
 export const CHECK_TARGETS = ['auto', 'file', 'live'];
 export const PR_BRANCH = 'llms-ink/llms-txt';
 export const AEO_BRANCH = 'llms-ink/aeo-fixes';
@@ -34,6 +35,7 @@ export function readInputs(env) {
     mode,
     apiKey: get('api-key'),
     inspectPaths: get('inspect-paths').split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+    inspectDir: get('inspect-dir'),
     generated: bool('generated', false),
     commitMessage: get('commit-message', MESSAGES[mode] ?? 'Update llms.txt'),
     branch: get('branch'),
@@ -77,7 +79,7 @@ const fence = (text) => '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(
  *   `exec` runs the llms.ink CLI in `context` mode.
  * @returns {Promise<{ ok: boolean, outputs: Record<string,string> }>}
  */
-export async function run({ env, fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), stdout = (s) => process.stdout.write(s), exec = spawnExec }) {
+export async function run({ env, fetch, sleep, signal, stdout = (s) => process.stdout.write(s), exec = spawnExec }) {
   const log = (s) => stdout(`${s}\n`);
   /** `props`: extra properties before `title`, each ending in a comma, e.g. `file=llms.txt,line=3,`. */
   const annotate = (level, title, message, props = '') => log(`::${level} ${props}title=${prop(title)}::${esc(message)}`);
@@ -94,22 +96,24 @@ export async function run({ env, fetch, sleep = (ms) => new Promise((r) => setTi
   };
 
   try {
-    if (!inputs.url && !['context','inspect'].includes(inputs.mode)) throw new Error('`url` is required.');
+    if (!inputs.url && !['context','inspect','inspect-context'].includes(inputs.mode)) throw new Error('`url` is required.');
     if (!MODES.includes(inputs.mode)) throw new Error(`\`mode\` must be one of ${MODES.join(', ')}; got \`${inputs.mode}\`.`);
+    if (inputs.inspectDir && inputs.mode !== 'inspect-context') throw new Error('inspect-dir requires explicit inspect-context mode.');
     if (inputs.mode === 'indexnow' && !inputs.indexnowKey) throw new Error('`mode: indexnow` needs `indexnow-key`.');
     if (inputs.apiKey) log(`::add-mask::${inputs.apiKey}`);
-    const deps = { fetch, sleep, apiKey: inputs.apiKey, api: env.LLMS_INK_API || undefined };
+    const deps = { fetch, sleep: sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))), apiKey: inputs.apiKey, api: env.LLMS_INK_API || undefined };
     const github = () => gitHub({ token: inputs.token, repository: env.GITHUB_REPOSITORY ?? '', api: env.GITHUB_API_URL, fetch });
-    const c = { inputs, env, deps, fetch, exec, log, annotate, summary, outputs, cwd, at, github };
+    const c = { inputs, env, deps, fetch, exec, log, annotate, summary, outputs, cwd, at, github, packSleep: sleep, signal };
 
     let ok = true;
     if (inputs.mode === 'inspect') ok = await inspectMode(c);
+    else if (inputs.mode === 'inspect-context') ok = await inspectContextMode(c);
     else if (inputs.mode === 'check') ok = await checkMode(c);
     else if (inputs.mode === 'aeo') ok = await aeoMode(c);
     else if (inputs.mode === 'context') ok = await contextMode(c);
     else if (inputs.mode !== 'indexnow') ok = await llmsMode(c);
     // IndexNow after the mode's own work (typically after a deploy): only when that work succeeded.
-    if (ok && inputs.mode !== 'inspect' && inputs.indexnowKey) ok = await indexNow(c);
+    if (ok && !['inspect','inspect-context'].includes(inputs.mode) && inputs.indexnowKey) ok = await indexNow(c);
     return finish(ok);
   } catch (err) {
     const title = err instanceof LlmsInkError && err.status ? `llms.ink (${err.status})` : 'llms.ink';
@@ -120,6 +124,7 @@ export async function run({ env, fetch, sleep = (ms) => new Promise((r) => setTi
 }
 
 function heading(inputs) {
+  if (inputs.mode === 'inspect-context') return 'Context-pack inspection';
   if (inputs.mode === 'inspect') return 'Hosted content inspection';
   if (inputs.mode === 'aeo') return `Agent's-eye view of ${inputs.url || '(no url)'}`;
   if (inputs.mode === 'context') return `Dependency docs in \`${inputs.contextDir}\``;
