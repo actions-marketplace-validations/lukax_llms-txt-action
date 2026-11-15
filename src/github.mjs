@@ -67,14 +67,16 @@ export function gitHub({ token, repository, api = 'https://api.github.com', fetc
     },
 
     /**
-     * Commit `files` ({path: content}) on top of `parent`. Returns the new commit sha, or null when the files
-     * already match `parent` (or `skipIfTree` is the resulting tree).
+     * Commit `files` ({path: content, or null to delete it}) on top of `parent`. Returns the new commit sha, or null
+     * when the files already match `parent` (or `skipIfTree` is the resulting tree).
      */
     async commit(parent, files, message, skipIfTree) {
       const parentTree = (await request('GET', `/git/commits/${parent}`)).tree.sha;
       const tree = await request('POST', '/git/trees', {
         base_tree: parentTree,
-        tree: Object.entries(files).map(([path, content]) => ({ path, mode: '100644', type: 'blob', content })),
+        tree: Object.entries(files).map(([path, content]) =>
+          content === null ? { path, mode: '100644', type: 'blob', sha: null } : { path, mode: '100644', type: 'blob', content },
+        ),
       });
       if (tree.sha === parentTree || tree.sha === skipIfTree) return null;
       return (await request('POST', '/git/commits', { message, tree: tree.sha, parents: [parent] })).sha;
@@ -88,6 +90,14 @@ export function gitHub({ token, repository, api = 'https://api.github.com', fetc
     /** Tree sha of a commit. */
     async treeOf(sha) {
       return (await request('GET', `/git/commits/${sha}`)).tree.sha;
+    },
+
+    /** Every file of a commit's tree as {path: blob sha}; {} when the commit isn't found. */
+    async blobs(sha) {
+      const commit = await request('GET', `/git/commits/${sha}`);
+      if (!commit) return {};
+      const tree = await request('GET', `/git/trees/${commit.tree.sha}?recursive=1`);
+      return Object.fromEntries((tree?.tree ?? []).filter((e) => e.type === 'blob').map((e) => [e.path, e.sha]));
     },
 
     /** Point a branch at `sha`, creating it when missing. `force` allows a non-fast-forward move. */
@@ -121,4 +131,31 @@ export function gitHub({ token, repository, api = 'https://api.github.com', fetc
       return request('POST', `/issues/${number}/comments`, { body });
     },
   };
+}
+
+const PULLS_SETTING =
+  ' Allow it under Settings → Actions → General → “Allow GitHub Actions to create and approve pull requests”, and give the job `pull-requests: write`.';
+
+/**
+ * Put `files` ({repo path: content, or null to delete}) on `head` as one commit on top of `base` (the branch is rebuilt
+ * every run), then open a pull request into `base` or update the open one's body. Returns the pull request and the
+ * pushed commit (null when `head` already had these files).
+ */
+export async function proposePull(gh, { head, base, files, message, body }) {
+  const baseSha = await gh.branchSha(base);
+  if (!baseSha) throw new Error(`Branch \`${base}\` doesn’t exist.`);
+  const headSha = await gh.branchSha(head);
+  const sha = await gh.commit(baseSha, files, message, headSha ? await gh.treeOf(headSha) : undefined);
+  if (sha) await gh.setBranch(head, sha, { force: true, exists: !!headSha });
+  let pr = await gh.openPull(head, base);
+  if (pr) await gh.updatePull(pr.number, body);
+  else {
+    try {
+      pr = await gh.createPull(head, base, message, body);
+    } catch (err) {
+      if (err.status === 403) err.message += PULLS_SETTING;
+      throw err;
+    }
+  }
+  return { pr, pushed: sha };
 }

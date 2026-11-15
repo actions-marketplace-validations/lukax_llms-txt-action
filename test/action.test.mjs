@@ -47,7 +47,10 @@ test('action.yml: every input reaches the step as INPUT_*, with the same default
   const yml = readFileSync(fileURLToPath(new URL('../action.yml', import.meta.url)), 'utf8');
   const block = yml.slice(yml.indexOf('\ninputs:'), yml.indexOf('\noutputs:'));
   const names = [...block.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1]);
-  assert.deepEqual(names, ['url', 'path', 'full-path', 'fresh', 'mode', 'api-key', 'generated', 'commit-message', 'branch', 'token', 'check-target', 'links']);
+  assert.deepEqual(names, [
+    'inspect-dir', 'inspect-paths', 'url', 'path', 'full-path', 'fresh', 'mode', 'api-key', 'generated', 'commit-message', 'branch', 'token', 'check-target', 'links',
+    'aeo-fail-on', 'autofix', 'autofix-dir', 'indexnow-key', 'indexnow-urls', 'indexnow-key-location', 'context-dir', 'context-max', 'manifests', 'agents-md',
+  ]);
   const env = {};
   for (const name of names) {
     const envName = `INPUT_${name.toUpperCase().replace(/-/g, '_')}`;
@@ -56,7 +59,9 @@ test('action.yml: every input reaches the step as INPUT_*, with the same default
     if (d && !d[1].includes('${{')) env[envName] = d[1].replace(/^'(.*)'$/, '$1');
   }
   assert.deepEqual(readInputs(env), readInputs({}));
-  for (const o of ['changed', 'tokens', 'path', 'pr-url', 'source', 'pages']) assert.match(yml, new RegExp(`^ {2}${o}:$`, 'm'));
+  for (const o of ['changed', 'tokens', 'path', 'pr-url', 'source', 'pages', 'aeo-fail', 'aeo-warn', 'indexnow-submitted']) {
+    assert.match(yml, new RegExp(`^ {2}${o}:\\n {4}description: .*\\n {4}value: \\$\\{\\{ steps\\.llms\\.outputs\\.${o} \\}\\}$`, 'm'));
+  }
 });
 
 test('write (default): same request and file as v1, outputs, summary', async () => {
@@ -68,7 +73,10 @@ test('write (default): same request and file as v1, outputs, summary', async () 
   assert.deepEqual(call.query, { url: 'https://acme.test', mode: 'llms', fresh: '1' });
   assert.equal(call.headers.authorization, undefined);
   assert.match(call.headers['user-agent'], /llms-txt-action/);
-  assert.deepEqual(r.outputs, { changed: 'true', tokens: String(Math.ceil(LLMS_TXT.length / 4)), path: 'llms.txt', 'pr-url': '', source: 'generated', pages: '2' });
+  assert.deepEqual(r.outputs, {
+    changed: 'true', tokens: String(Math.ceil(LLMS_TXT.length / 4)), path: 'llms.txt', 'pr-url': '', source: 'generated', pages: '2',
+    'aeo-fail': '', 'aeo-warn': '', 'indexnow-submitted': '',
+  });
   assert.match(readFileSync(t.env.GITHUB_OUTPUT, 'utf8'), /^changed=true$/m);
   assert.match(r.summary, /\| Sections \| 1 \|/);
   assert.match(r.summary, /`llms.txt` is new/);
